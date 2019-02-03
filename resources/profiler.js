@@ -2,7 +2,13 @@
 const oldInstantiate = WebAssembly.instantiate;
 WebAssembly.instantiate = (sourceBuffer, importObject) => {
     let importObjectWithProfiler = importObject || {};
-    importObjectWithProfiler.prof = {printInt : arg => console.log("Function call count:" + arg), getTime: () => performance.now()};
+    var funcs = {};
+    importObjectWithProfiler.prof = {printInt : arg => console.log("Function call count:" + arg), 
+                                     getTime: () => performance.now(), 
+                                     updateArc: function(id, callCount, targetTime){
+                                        funcs[id].callCount = callCount;
+                                        funcs[id].targetTime = targetTime;
+                                     } };
 
     const result = oldInstantiate(sourceBuffer, importObjectWithProfiler);
     return result;

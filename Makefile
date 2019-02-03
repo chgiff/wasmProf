@@ -1,9 +1,15 @@
-BINARYEN_ROOT=../binaryen
-BINARYEN_INC=-I$(BINARYEN_ROOT)/src
-BINARYEN_LIB=-L$(BINARYEN_ROOT)/lib
+BINARYEN_ROOT=ext/binaryen
+BINARYEN_INC=$(BINARYEN_ROOT)/src
+BINARYEN_LIB=$(BINARYEN_ROOT)/lib
 
-all:
-	g++ $(BINARYEN_INC) -g -std=c++11 -o wasmProf src/wasmProf.cpp -rdynamic $(BINARYEN_ROOT)/lib/libwasm.a $(BINARYEN_ROOT)/lib/libasmjs.a $(BINARYEN_ROOT)/lib/libemscripten-optimizer.a $(BINARYEN_ROOT)/lib/libpasses.a $(BINARYEN_ROOT)/lib/libir.a $(BINARYEN_ROOT)/lib/libcfg.a $(BINARYEN_ROOT)/lib/libsupport.a $(BINARYEN_ROOT)/lib/libwasm.a -pthread
+all: binaryen
+	g++ -I$(BINARYEN_INC) -g -std=c++11 -o wasmProf src/wasmProf.cpp -rdynamic $(BINARYEN_LIB)/libwasm.a $(BINARYEN_LIB)/libasmjs.a $(BINARYEN_LIB)/libemscripten-optimizer.a $(BINARYEN_LIB)/libpasses.a $(BINARYEN_LIB)/libir.a $(BINARYEN_LIB)/libcfg.a $(BINARYEN_LIB)/libsupport.a $(BINARYEN_LIB)/libwasm.a -pthread
 
+binaryen:
+	cd ext/binaryen && $(MAKE)
+
+setup:
+	cd ext/binaryen && cmake .
+	
 clean:
 	rm wasmProf

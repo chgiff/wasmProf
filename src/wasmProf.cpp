@@ -5,27 +5,6 @@ using namespace wasm;
 
 #define MEM_OFFSET_TEMP 16*1024
 
-
-
-//create a ast subgraph to increment the given global by 1
-Expression *createCounter(Name globalName)
-{
-    Binary *b = new Binary();
-    b->op = AddInt32;
-    GetGlobal *gg = new GetGlobal();
-    gg->name = globalName;
-    b->left = gg;
-    Const *c = new Const();
-    c->set(Literal(1));
-    b->right = c;
-
-    SetGlobal *e = new SetGlobal();
-    e->name = globalName;
-    e->value = b;
-
-    return e;
-}
-
 Function *createMemCopy()
 {
     Function *cpy = new Function();
@@ -37,12 +16,43 @@ struct CallPath{
     Name srcFunc;
     Name targetFunc;
     Name globalCounter;
-}
+};
 
 std::map<Name, struct CallPath> arcs;
 
 struct MyVisitor : public PostWalker<MyVisitor>
 {
+    //create a ast subgraph to increment the given global by 1
+    Expression *createCounter(Name globalName)
+    {
+        if(!getModule()->getGlobalOrNull(globalName)){
+            Global *newGlobal = new Global();
+            newGlobal->name = globalName;
+            newGlobal->mutable_ = true;
+            newGlobal->type = Type::i32;
+            Const *c = new Const();
+            c->set(Literal(0));
+            newGlobal->init = c; 
+            getModule()->addGlobal(newGlobal);
+            countGlobals.push_back(globalName); //internal state of which globals were added 
+        }
+
+        Binary *b = new Binary();
+        b->op = AddInt32;
+        GetGlobal *gg = new GetGlobal();
+        gg->name = globalName;
+        b->left = gg;
+        Const *c = new Const();
+        c->set(Literal(1));
+        b->right = c;
+
+        SetGlobal *e = new SetGlobal();
+        e->name = globalName;
+        e->value = b;
+
+        return e;
+    }
+
     void visitFunction(Function *curr)
     {
         if(curr->imported()){
@@ -77,19 +87,6 @@ struct MyVisitor : public PostWalker<MyVisitor>
             funcBlock->list.push_back(curr->body);
         }
         curr->body = funcBlock;
-
-
-        if(!getModule()->getGlobalOrNull(globalName)){
-            Global *newGlobal = new Global();
-            newGlobal->name = globalName;
-            newGlobal->mutable_ = true;
-            newGlobal->type = Type::i32;
-            Const *c = new Const();
-            c->set(Literal(0));
-            newGlobal->init = c; 
-            getModule()->addGlobal(newGlobal);
-            countGlobals.push_back(globalName); //internal state of which globals were added 
-        }
 
         //if exported, add setup at begining and cleanup at end
         if(getModule()->getExportOrNull(curr->name)){
@@ -159,22 +156,22 @@ struct MyVisitor : public PostWalker<MyVisitor>
         }
     }
 
-    static int id = 0;
     void visitCall(Call *curr)
     {
+        static int id = 0;
         Block *blk = new Block(getModule()->allocator);
 
         struct CallPath arc = 
             {
                 getFunction()->name,
                 curr->target,
-                Name(id++);
+                Name(std::to_string(id++))
             };
-        arcs.insert(&arc.globalCounter, &arc);
+        arcs.insert(std::make_pair(arc.globalCounter, arc));
 
         //track this arc
-        blk->list.add(createCounter(arc.globalCounter));
-        blk->list.add(curr);
+        blk->list.push_back(createCounter(arc.globalCounter));
+        blk->list.push_back(curr);
 
         replaceCurrent(blk);
     }
