@@ -1,3 +1,4 @@
+#include <fstream>
 #include "wasm-io.h"
 #include "wasm-traversal.h"
 
@@ -10,20 +11,28 @@ Function *createMemCopy()
     Function *cpy = new Function();
 }
 
-std::vector<Name> countGlobals;
+//std::vector<Name> countGlobals;
 
 struct CallPath{
-    Name srcFunc;
-    Name targetFunc;
+    //Name srcFunc;
+    //Name targetFunc;
+    int srcFuncID;
+    int targetFuncID;
     Name globalCounter;
+    Name globalTimeInTarget; //accumulate amount of time spent in target function
 };
 
-std::map<Name, struct CallPath> arcs;
+//give each function a numberic id
+int curFuncID = 0;
+std::map<Name, int> funcIDs;
 
-struct MyVisitor : public PostWalker<MyVisitor>
+//list of all arcs
+std::vector<struct CallPath> arcs;
+
+struct MyVisitor : public ExpressionStackWalker<MyVisitor>
 {
     //create a ast subgraph to increment the given global by 1
-    Expression *createCounter(Name globalName)
+    Expression *createArcCounter(Name globalName)
     {
         if(!getModule()->getGlobalOrNull(globalName)){
             Global *newGlobal = new Global();
@@ -34,7 +43,6 @@ struct MyVisitor : public PostWalker<MyVisitor>
             c->set(Literal(0));
             newGlobal->init = c; 
             getModule()->addGlobal(newGlobal);
-            countGlobals.push_back(globalName); //internal state of which globals were added 
         }
 
         Binary *b = new Binary();
@@ -53,30 +61,62 @@ struct MyVisitor : public PostWalker<MyVisitor>
         return e;
     }
 
+    Expression *createArcTimeAccum(Name globalName)
+    {
+        //TODO
+        if(!getModule()->getGlobalOrNull(globalName)){
+            Global *newGlobal = new Global();
+            newGlobal->name = globalName;
+            newGlobal->mutable_ = true;
+            newGlobal->type = Type::f64; //TODO f64 or f32 ??
+            Const *c = new Const();
+            c->set(Literal(0.0));
+            newGlobal->init = c; 
+            getModule()->addGlobal(newGlobal);
+        }
+
+        Binary *b = new Binary();
+        b->op = AddFloat64; //TODO type
+        GetGlobal *gg = new GetGlobal();
+        gg->name = globalName;
+        b->left = gg;
+        //TODO call get time function
+        Const *c = new Const();
+        c->set(Literal(1.0));
+        b->right = c;
+
+        SetGlobal *e = new SetGlobal();
+        e->name = globalName;
+        e->value = b;
+
+        return e;
+    }
+
     void visitFunction(Function *curr)
     {
+        //add this function to the list and assign it an id
+        funcIDs[curr->name] = curFuncID++;
+
         if(curr->imported()){
             //std::cout << "import: " << curr->base << " " << curr->module << std::endl;
             return;
         }
-        else{
-            //std::cout << "not import: " << curr->base << " " << curr->module << std::endl;
-        }
-
         if(!strcmp(curr->name.c_str(), "_memcpy")){
             std::cout << "Found memcpy" << std::endl;
         }
 
+        /*
         //counter global name (fcnName + "Cnt")
         size_t nameLen = strlen(curr->name.c_str());
         char *globalStr = (char*)malloc(nameLen + 4);
         strcpy(globalStr, curr->name.c_str());
         strcpy(globalStr + nameLen, "Cnt");
         Name globalName = Name(globalStr);
+        */
 
         //if body is a block, just add to it
         Block *funcBlock = new Block(getModule()->allocator);
-        funcBlock->list.push_back(createCounter(globalName));
+        //funcBlock->list.push_back(createArcCounter(globalName)); //No longer tracking on functions, now tracking at call arcs
         if(curr->body->is<Block>()){ 
             for(Expression *e : ((Block *)curr->body)->list){
                 funcBlock->list.push_back(e);
@@ -89,7 +129,7 @@ struct MyVisitor : public PostWalker<MyVisitor>
         curr->body = funcBlock;
 
         //if exported, add setup at begining and cleanup at end
-        if(getModule()->getExportOrNull(curr->name)){
+        if(getModule()->getExportOrNull(curr->name) && !strcmp(curr->name.c_str(), "_main")){ //TODO figure out which function to make top level
             std::cout << "This function is exported: " << curr->name << std::endl;
             //add call to result function at the end
             Call *result_call = new Call(getModule()->allocator);
@@ -155,25 +195,77 @@ struct MyVisitor : public PostWalker<MyVisitor>
             curr->ptr = addOffset;
         }
     }
-
+    
     void visitCall(Call *curr)
     {
         static int id = 0;
-        Block *blk = new Block(getModule()->allocator);
-
         struct CallPath arc = 
             {
-                getFunction()->name,
-                curr->target,
-                Name(std::to_string(id++))
+                funcIDs[getFunction()->name],
+                funcIDs[curr->target],
+                Name(std::to_string(id++)),
+                Name(std::to_string(id++)) //TODO fix
             };
-        arcs.insert(std::make_pair(arc.globalCounter, arc));
+        arcs.push_back(arc);
 
-        //track this arc
-        blk->list.push_back(createCounter(arc.globalCounter));
-        blk->list.push_back(curr);
+        //search up expression stack to find a parent that is a block (size-2 is call's immediate parent)
+        int expStackLevel;
+        for(expStackLevel = expressionStack.size() - 2; expStackLevel >= 0; expStackLevel--){
+            //look for control flow blocks
+            if(expressionStack[expStackLevel]->is<Block>()){
+                break;
+            }
+            else if(expressionStack[expStackLevel]->is<If>(){
 
-        replaceCurrent(blk);
+            }
+            else if(expressionStack[expStackLevel]->is<Loop>()
+        }
+        if(expStackLevel < 0){
+            //failed to find suitable block
+            std::cout << "Error: could not find block to hoist call expression" << std::endl;
+        }
+
+        //find where in the block the current execution is
+        Block *blk = expressionStack[expStackLevel]->dynCast<Block>();
+        Block *newBlk = new Block(getModule()->allocator);
+        int blkLoc;
+        for(blkLoc = 0; blkLoc < blk->list.size(); blkLoc++){
+            if(blk->list[blkLoc] == expressionStack[expStackLevel + 1]){
+                break;
+            }
+            newBlk->list.push_back(blk->list[blkLoc]);
+        }
+
+        //hoist function call into the nearest block just before current execution
+        newBlk->list.push_back(createArcCounter(arc.globalCounter));
+        newBlk->list.push_back(createArcTimeAccum(arc.globalTimeInTarget));
+        //save call return in a local if not void
+        Type targetReturn = getModule()->getFunction(curr->target)->result;
+        if(targetReturn != Type::none){
+            getFunction()->vars.push_back(targetReturn); 
+            Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
+            SetLocal *sl = new SetLocal();
+            sl->index = ind;
+            sl->value = curr;
+            newBlk->list.push_back(sl); //add to hoist block
+
+            GetLocal *gl = new GetLocal();
+            gl->index = ind;
+            replaceCurrent(gl); //replace where it used to be with getLocal
+        }
+        else{
+            newBlk->list.push_back(curr); //add to hoist block
+
+            Nop *nop = new Nop();
+            replaceCurrent(nop); //replace where it used to be with nop
+        }
+
+        //fill in rest of the block
+        for(blkLoc = blkLoc+1; blkLoc < blk->list.size(); blkLoc++){
+            newBlk->list.push_back(blk->list[blkLoc]);
+        }
+
+        blk->list.swap(newBlk->list);
     }
 };
 
@@ -196,19 +288,53 @@ void addProfFunctions(Module *mod)
     getTime->result = Type::f64;
     mod->addFunction(getTime);
 
+    //updateArc function import
+    Function *updateArc = new Function();
+    updateArc->name = Name("updateArc");
+    updateArc->module = Name("prof");
+    updateArc->base = Name("updateArc");
+    updateArc->params.push_back(Type::i32); //src function
+    updateArc->params.push_back(Type::i32); //target function id
+    updateArc->params.push_back(Type::i32); //arc call count
+    updateArc->params.push_back(Type::f64); //target accumulate time //TODO check type
+    mod->addFunction(updateArc);
+
+    //printResults function import
+    Function *printResults = new Function();
+    printResults->name = Name("printResults");
+    printResults->module = Name("prof");
+    printResults->base = Name("printResults");
+    mod->addFunction(printResults);
+
     //print result function
     Function *printRes = new Function();
     printRes->name = Name("_profPrintResult");
     Block *body = new Block(mod->allocator);
-    //print each of the function counts
-    for(Name n : countGlobals){
+    //update tracking info for each arc by calling out to host
+    for(struct CallPath& arc : arcs){
         Call *c = new Call(mod->allocator);
-        c->target = Name("printInt");
-        GetGlobal *g = new GetGlobal();
-        g->name = n;
-        c->operands.push_back(g);
+        c->target = updateArc->name;
+
+        Const *src = new Const();
+        src->set(Literal(arc.srcFuncID));
+        Const *target = new Const();
+        target->set(Literal(arc.targetFuncID));
+        GetGlobal *gCount = new GetGlobal();
+        gCount->name = arc.globalCounter;
+        GetGlobal *gTime = new GetGlobal();
+        gTime->name = arc.globalTimeInTarget;
+
+        c->operands.push_back(src);
+        c->operands.push_back(target);
+        c->operands.push_back(gCount);
+        c->operands.push_back(gTime);
         body->list.push_back(c);
     }
+    //call imported print results function
+    Call *c = new Call(mod->allocator);
+    c->target = printResults->name;
+    body->list.push_back(c);
+
     printRes->body = body;
     mod->addFunction(printRes);
 
@@ -248,10 +374,28 @@ void setupProfMemory(Module *mod, int memOffset)
     //TODO add new data segment for prof data at lowest address
 }
 
+//write out a js file that declares a json object mapping function id to function name
+void writeFuncNameMap(std::ofstream& jsFile)
+{
+    /*
+    jsFile << "profFuncMap = [";
+    for(auto const& f : funcIDs){
+        jsFile << "{" << f.second << ":\"" << f.first << "\"},"; //id number then name
+    }
+    jsFile << "{\"error\":\"error\"}];";
+    */
+    
+    //probably a better way to do it
+    jsFile << "profFuncMap=[]; ";
+    for(auto const& f : funcIDs){
+        jsFile << "profFuncMap[" << f.second << "]=\"" << f.first << "\";"; //id number index to name
+    }
+}
+
 int main(int argc, const char* argv[]) 
 {
     if(argc < 2){
-        std::cout << "Usage: parsey <wasm file>" << std::endl;
+        std::cout << "Usage: "<< argv[0] << " <wasm file>" << std::endl;
     }
 
     Module mod;
@@ -268,14 +412,20 @@ int main(int argc, const char* argv[])
 
     v.walkModule(&mod);
     addProfFunctions(&mod);
-    setupProfMemory(&mod, MEM_OFFSET_TEMP);
+    //setupProfMemory(&mod, MEM_OFFSET_TEMP);
 
-    std::cout << mod.memory.initial << ", " << mod.memory.max << std::endl;
-    std::cout << mod.memory.segments[0].offset << std::endl;
+    //std::cout << mod.memory.initial << ", " << mod.memory.max << std::endl;
+    //std::cout << mod.memory.segments[0].offset << std::endl;
 
     //WasmPrinter::printModule(&mod);
 
     writer.write(mod, "prof_" + std::string(argv[1]));
+
+    //write the accompanying js
+    std::ofstream jsFile;
+    jsFile.open("prof_" + std::string(argv[1]) + ".js");
+    writeFuncNameMap(jsFile);
+    jsFile.close();
 
     return 0;
 }
