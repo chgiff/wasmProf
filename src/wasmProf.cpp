@@ -1,21 +1,11 @@
 #include <fstream>
 #include "wasm-io.h"
 #include "wasm-traversal.h"
+#include "js.h"
 
 using namespace wasm;
 
-#define MEM_OFFSET_TEMP 16*1024
-
-Function *createMemCopy()
-{
-    Function *cpy = new Function();
-}
-
-//std::vector<Name> countGlobals;
-
 struct CallPath{
-    //Name srcFunc;
-    //Name targetFunc;
     int srcFuncID;
     int targetFuncID;
     Name globalCounter;
@@ -31,20 +21,30 @@ std::vector<struct CallPath> arcs;
 
 struct MyVisitor : public ExpressionStackWalker<MyVisitor>
 {
+
+    Name createGlobal(Type type, Literal initialValue)
+    {
+        static int uniqueGlobal = 1;
+        Name globalName;
+        do{
+            uniqueGlobal++;
+            globalName = Name(std::to_string(uniqueGlobal));
+        } while(getModule()->getGlobalOrNull(globalName));
+        Global *newGlobal = new Global();
+        newGlobal->name = globalName;
+        newGlobal->mutable_ = true;
+        newGlobal->type = type;
+        Const *c = new Const();
+        c->set(initialValue);
+        newGlobal->init = c; 
+        getModule()->addGlobal(newGlobal);
+
+        return globalName;
+    }
+
     //create a ast subgraph to increment the given global by 1
     Expression *createArcCounter(Name globalName)
     {
-        if(!getModule()->getGlobalOrNull(globalName)){
-            Global *newGlobal = new Global();
-            newGlobal->name = globalName;
-            newGlobal->mutable_ = true;
-            newGlobal->type = Type::i32;
-            Const *c = new Const();
-            c->set(Literal(0));
-            newGlobal->init = c; 
-            getModule()->addGlobal(newGlobal);
-        }
-
         Binary *b = new Binary();
         b->op = AddInt32;
         GetGlobal *gg = new GetGlobal();
@@ -76,18 +76,6 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
     //create AST subgraph to increment the time
     Expression *createArcTimeAccum(Name globalName, Index startTimeLocalIndex)
     {
-        //TODO
-        if(!getModule()->getGlobalOrNull(globalName)){
-            Global *newGlobal = new Global();
-            newGlobal->name = globalName;
-            newGlobal->mutable_ = true;
-            newGlobal->type = Type::f64;
-            Const *c = new Const();
-            c->set(Literal(0.0));
-            newGlobal->init = c; 
-            getModule()->addGlobal(newGlobal); 
-        }
-
         //get difference between start time and current time
         Binary *timeDiff = new Binary();
         timeDiff->op = SubFloat64;
@@ -136,9 +124,6 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
             //std::cout << "import: " << curr->base << " " << curr->module << std::endl;
             return;
         }
-        if(!strcmp(curr->name.c_str(), "_memcpy")){
-            std::cout << "Found memcpy" << std::endl;
-        }
 
         //if body is a block, just add to it
         Block *funcBlock;
@@ -173,8 +158,36 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
             }
         }
     }
+
+    //adds instructions to block to save call's return value if necessary
+    //returns what the call should be replace with (getLocal if it has a return value and nop if it does not have a return value)
+    Expression *saveReturn(Block *parentBlk, Expression* currCall, Type returnType)
+    {
+        Expression *callReplacement;
+        //if return type is none or the call will be dropped anyway, then don't save return
+        if(returnType == Type::none || getParent()->is<Drop>()){
+            parentBlk->list.push_back(currCall); //add to hoist block
+
+            Nop *nop = new Nop();
+            callReplacement = nop;
+        }
+        //else save the return value
+        else{
+            getFunction()->vars.push_back(returnType); 
+            Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
+            SetLocal *sl = new SetLocal();
+            sl->index = ind;
+            sl->value = currCall;
+            parentBlk->list.push_back(sl); //add to hoist block
+
+            GetLocal *gl = new GetLocal();
+            gl->index = ind;
+            callReplacement = gl;
+        }
+        return callReplacement;
+    }
     
-    void hoistCallNewBlock(Call* currCall, struct CallPath& arc, Expression **newBlockPtr, int newBlockStackLevel)
+    void hoistCallNewBlock(Expression* currCall, Name & target, Type returnType, struct CallPath& arc, Expression **newBlockPtr, int newBlockStackLevel)
     {
         Block *newBlk = new Block(getModule()->allocator);
         newBlk->list.push_back(createArcCounter(arc.globalCounter));
@@ -182,26 +195,8 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
         Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
         newBlk->list.push_back(createStartTime(startTimeLocalIndex));
 
-        Type targetReturn = getModule()->getFunction(currCall->target)->result;
-        Expression *callReplacement;
-        if(targetReturn != Type::none){
-            getFunction()->vars.push_back(targetReturn); 
-            Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
-            SetLocal *sl = new SetLocal();
-            sl->index = ind;
-            sl->value = currCall;
-            newBlk->list.push_back(sl); //add to hoist block
-
-            GetLocal *gl = new GetLocal();
-            gl->index = ind;
-            callReplacement = gl;
-        }
-        else{
-            newBlk->list.push_back(currCall); //add to hoist block
-
-            Nop *nop = new Nop();
-            callReplacement = nop;
-        }
+        //save call return in a local if not void
+        Expression *callReplacement = saveReturn(newBlk, currCall, returnType);
 
         newBlk->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
 
@@ -224,6 +219,7 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
         *newBlockPtr = newBlk; //do the swap
         expressionStack.insert(expressionStack.begin()+newBlockStackLevel, newBlk); //fix expression stack
         pushTask(s.func, &newBlk->list.back()); //push back task with new address of old pointer
+        expressionStack.pop_back(); //must keep stack consitent with number of tasks in queue
 
         //push back the other tasks
         while(tmpStack.size() > 0){
@@ -237,7 +233,7 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
 
     //blk is the block to host the call into
     //first child is the exprssion that contains the call but is a direct child of the block
-    void hoistCallExistingBlock(Call* currCall, struct CallPath& arc, Block *blk, Expression *firstChild)
+    void hoistCallExistingBlock(Expression* currCall, Name & target, Type returnType, struct CallPath& arc, Block *blk, Expression *firstChild)
     {
         //find where in the block the current execution is
         Block *newBlk = new Block(getModule()->allocator);
@@ -254,27 +250,9 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
         getFunction()->vars.push_back(Type::f64); //add new local for start time
         Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
         newBlk->list.push_back(createStartTime(startTimeLocalIndex));
+
         //save call return in a local if not void
-        Type targetReturn = getModule()->getFunction(currCall->target)->result;
-        Expression *callReplacement;
-        if(targetReturn != Type::none){
-            getFunction()->vars.push_back(targetReturn); 
-            Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
-            SetLocal *sl = new SetLocal();
-            sl->index = ind;
-            sl->value = currCall;
-            newBlk->list.push_back(sl); //add to hoist block
-
-            GetLocal *gl = new GetLocal();
-            gl->index = ind;
-            callReplacement = gl;
-        }
-        else{
-            newBlk->list.push_back(currCall); //add to hoist block
-
-            Nop *nop = new Nop();
-            callReplacement = nop;
-        }
+        Expression *callReplacement = saveReturn(newBlk, currCall, returnType);
         newBlk->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
         replaceCurrent(callReplacement);
 
@@ -289,16 +267,16 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
 
         blk->list.swap(newBlk->list);
     }
-
-    void visitCall(Call *curr)
+    
+    //this handles instrumenting both Call and CallIndirect instructions once the target is determined
+    void handleCall(Expression *call, Name & target, Type returnType)
     {
-        static int id = 1;
         struct CallPath arc = 
             {
                 getOrAddFuncID(getFunction()->name),
-                getOrAddFuncID(curr->target),
-                Name(std::to_string(id++)),
-                Name(std::to_string(id++)) //TODO fix
+                getOrAddFuncID(target),
+                createGlobal(Type::i32, Literal(0)),
+                createGlobal(Type::f64, Literal(0.0))
             };
         arcs.push_back(arc);
 
@@ -307,18 +285,18 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
         for(expStackLevel = expressionStack.size() - 2; expStackLevel >= 0; expStackLevel--){
             //look for control flow blocks
             if(expressionStack[expStackLevel]->is<Block>()){
-                hoistCallExistingBlock(curr, arc, expressionStack[expStackLevel]->dynCast<Block>(), expressionStack[expStackLevel + 1]);
+                hoistCallExistingBlock(call, target, returnType, arc, expressionStack[expStackLevel]->dynCast<Block>(), expressionStack[expStackLevel + 1]);
                 return;
             }
             else if(expressionStack[expStackLevel]->is<If>()){
                 If *ifExp = expressionStack[expStackLevel]->dynCast<If>();
                 //check where in the if
                 if(expressionStack[expStackLevel + 1] == ifExp->ifTrue){
-                    hoistCallNewBlock(curr, arc, &ifExp->ifTrue, expStackLevel + 1);
+                    hoistCallNewBlock(call, target, returnType, arc, &ifExp->ifTrue, expStackLevel + 1);
                     return;
                 }
                 else if(expressionStack[expStackLevel + 1] == ifExp->ifFalse){
-                    hoistCallNewBlock(curr, arc, &ifExp->ifFalse, expStackLevel + 1);
+                    hoistCallNewBlock(call, target, returnType, arc, &ifExp->ifFalse, expStackLevel + 1);
                     return;
                 }
                 else if(expressionStack[expStackLevel + 1] == ifExp->condition){
@@ -330,28 +308,35 @@ struct MyVisitor : public ExpressionStackWalker<MyVisitor>
             }
             else if(expressionStack[expStackLevel]->is<Loop>()){
                 Loop *loopExp = expressionStack[expStackLevel]->dynCast<Loop>();
-                hoistCallNewBlock(curr, arc, &loopExp->body, expStackLevel + 1);
+                hoistCallNewBlock(call, target, returnType, arc, &loopExp->body, expStackLevel + 1);
                 return;
             }
         }
         if(expStackLevel < 0){
-            //failed to find suitable block
-            std::cout << "Error: could not find block to hoist call expression" << std::endl;
+            //failed to find suitable block or control flow location
+            //must replace function body with new block
+            hoistCallNewBlock(call, target, returnType, arc, &(getFunction()->body), 0);
         }
+    }
+
+    void visitCall(Call *curr)
+    {
+        handleCall(curr, curr->target, getModule()->getFunction(curr->target)->result);
+    }
+
+    void visitCallIndirect(CallIndirect *curr)
+    {
+        //TODO determine target of indirect call
+        Name tmp = Name("Indirect");
+
+        std::cout << "Handling call indirect with type " << curr->fullType << ": " << getModule()->getFunctionType(curr->fullType)->result <<  std::endl;
+
+        handleCall(curr, tmp, getModule()->getFunctionType(curr->fullType)->result);
     }
 };
 
-
 void addProfFunctions(Module *mod)
 {
-    //printInt function import
-    Function *printInt = new Function();
-    printInt->name = Name("printInt");
-    printInt->module = Name("prof");
-    printInt->base = Name("printInt");
-    printInt->params.push_back(Type::i32);
-    mod->addFunction(printInt);
-
     //getTime function import
     Function *getTime = new Function();
     getTime->name = Name("getTime");
@@ -417,19 +402,14 @@ void addProfFunctions(Module *mod)
 //write out a js file that declares a json object mapping function id to function name
 void writeFuncNameMap(std::ofstream& jsFile)
 {
-    /*
-    jsFile << "profFuncMap = [";
+    std::string jsFuncMapName = "fMap";
+
+    //build the function id -> function name map
+    std::string jsFuncMap = jsFuncMapName + "=[]; ";
     for(auto const& f : funcIDs){
-        jsFile << "{" << f.second << ":\"" << f.first << "\"},"; //id number then name
+        jsFuncMap = jsFuncMap + jsFuncMapName + "[" + std::to_string(f.second) + "]=\"" + f.first.str + "\";"; //id number index to name
     }
-    jsFile << "{\"error\":\"error\"}];";
-    */
-    
-    //probably a better way to do it
-    jsFile << "profFuncMap=[]; ";
-    for(auto const& f : funcIDs){
-        jsFile << "profFuncMap[" << f.second << "]=\"" << f.first << "\";"; //id number index to name
-    }
+    jsFile << JS_SRC(jsFuncMapName, jsFuncMap);
 }
 
 int main(int argc, const char* argv[]) 

@@ -9,7 +9,7 @@ binaryen:
 	cd ext/binaryen && $(MAKE)
 
 setup:
-	cd ext/binaryen && cmake .
+	cd ext/binaryen && cmake -DCMAKE_BUILD_TYPE=Debug .
 	
 clean:
 	rm wasmProf
