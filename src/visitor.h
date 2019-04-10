@@ -47,7 +47,8 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
 
     int getOrAddFuncID(wasm::Name name);
 
-    void addDecorator(wasm::Function *curr);
+    void addExportDecorator(wasm::Function *originalFunc);
+    void addDecorator(wasm::Function *originalFunc, wasm::Name decoratorName, std::vector<int> possibleSrcIDs);
 
     void visitFunction(wasm::Function *curr);
 

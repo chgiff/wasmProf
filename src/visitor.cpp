@@ -98,93 +98,105 @@ int ProfVisitor::getOrAddFuncID(Name name)
     return it->second;
 }
 
+void ProfVisitor::addExportDecorator(Function *originalFunc)
+{
+    bool exported = false;
+    //generate unique name
+    std::string tmpStr = std::string(originalFunc->name.str);
+    while(getModule()->getFunctionOrNull(Name(tmpStr))){
+        tmpStr += "_";
+    }
+    Name decoratorName = Name(tmpStr);
+
+    //check all exports to see if they export the original function
+    for(auto & e : getModule()->exports){
+        if(e->value == originalFunc->name)
+        {
+           //update export to use decorated function call
+            e->value = decoratorName;
+            exported = true;
+            std::cout << "Updated export with decorator: " << decoratorName << std::endl;
+        }
+    }
+
+    //if exported at least once, then build decorator function
+    if(exported){
+        std::vector<int> possibleSrcIDs;
+        for(Name & import : functionImports){
+            possibleSrcIDs.push_back(getOrAddFuncID(import));
+        }
+        addDecorator(originalFunc, decoratorName, possibleSrcIDs);
+    }
+}
+
 /*
  * adds decorator for functions that need it
  * both exported functions (called from JS) and 
  * functions in the function table (called with call_indirect)
  */
-void ProfVisitor::addDecorator(Function *curr)
+void ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::vector<int> possibleSrcIDs)
 {
-    bool exported = false;
     Function *decorator = new Function();
-    //generate unique name
-    std::string tmpStr = std::string(curr->name.str);
-    while(getModule()->getFunctionOrNull(Name(tmpStr))){
-        tmpStr += "_";
-    }
-    Name newName = Name(tmpStr);
-    decorator->name = newName;
-
-    //check all exports to see if they export the original function
-    for(auto & e : getModule()->exports){
-        if(e->value == curr->name)
-        {
-           //update export to use decorated function call
-            e->value = decorator->name;
-            exported = true;
-            std::cout << "Updated export with decorator: " << decorator->name << std::endl;
-        }
-    }
-
-    //if not exporeted, don't build this function
-    if(!exported){
-        delete decorator;
-        return;
-    }
-
+    decorator->name = decoratorName;
 
     //set type same as original
-    decorator->result = curr->result;
-    decorator->params = curr->params;
+    decorator->result = originalFunc->result;
+    decorator->params = originalFunc->params;
     //vars must be a copy because we are going to add vars
-    for(int i = 0; i < curr->vars.size(); i++){
-        decorator->vars.push_back(curr->vars[i]);
+    for(int i = 0; i < originalFunc->vars.size(); i++){
+        decorator->vars.push_back(originalFunc->vars[i]);
     }
 
     //create body
     Block *body  = new Block(getModule()->allocator);
     decorator->body = body;
-    //add time tracking
+
+    //save lastCaller locally so it doesn't get overwritten
+    decorator->vars.push_back(Type::i32);
+    Index lastCallerLocalIndex = decorator->params.size() + decorator->vars.size() - 1;
+    body->list.push_back(createSetLocal(lastCallerLocalIndex, createGetGlobal(lastCaller)));
+
+    //add start time tracking
     decorator->vars.push_back(Type::f64);
     Index startTimeLocalIndex = decorator->params.size() + decorator->vars.size() - 1;
     body->list.push_back(createStartTime(startTimeLocalIndex));
-    //build decorator function
-    Call *call = createCall(getModule()->allocator, curr->name, 0);
+
+    //add call back to original function
+    Call *call = createCall(getModule()->allocator, originalFunc->name, 0);
     for(int i = 0; i < decorator->params.size(); i++){
         call->operands.push_back(createGetLocal(i));
     }
+
     //save call return if not void
     Return *ret = new Return();
-    if(curr->result == Type::none){
+    if(originalFunc->result == Type::none){
         body->list.push_back(call);
     }
     else{
-        decorator->vars.push_back(curr->result);
+        decorator->vars.push_back(originalFunc->result);
         Index retIndex = decorator->params.size() + decorator->vars.size() - 1;
         body->list.push_back(createSetLocal(retIndex, call));
 
         ret->value = createGetLocal(retIndex);
     }
 
-    //TODO add time tracking
-    //need to figure out where this call came from 
-    //it could be any of the imported functions or the first call into wasm
-    GetGlobal *getLastCall = createGetGlobal(lastCaller);
+    //need to figure out where this call came from
+    GetLocal *getLastCaller = createGetLocal(lastCallerLocalIndex);
 
     //TODO DEBUG
-    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCall));
+    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCaller));
+    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
 
     Switch *lookupCaller = new Switch(getModule()->allocator);
-    lookupCaller->targets.resize(functionImports.size() + 1);
-    lookupCaller->condition = getLastCall;
+    lookupCaller->targets.resize(1 + *std::max_element(std::begin(possibleSrcIDs), std::end(possibleSrcIDs)));
+    lookupCaller->condition = getLastCaller;
 
     Block *curBlock = body;
-    for(int i = 0; i < functionImports.size(); i++){
-        Function *imported = getModule()->getFunction(functionImports[i]);
+    for(int i = 0; i < possibleSrcIDs.size(); i++){
         struct CallPath arc = 
         {
-            getOrAddFuncID(imported->name),
-            getOrAddFuncID(curr->name),
+            possibleSrcIDs[i],
+            getOrAddFuncID(originalFunc->name),
             createGlobal(getModule(), Type::i32, Literal(0)),
             createGlobal(getModule(), Type::f64, Literal(0.0))
         };
@@ -197,7 +209,7 @@ void ProfVisitor::addDecorator(Function *curr)
         curBlock->list.push_back(createArcCounter(arc.globalCounter));
         curBlock->list.push_back(ret);
 
-        lookupCaller->targets[getOrAddFuncID(imported->name)] = nextBlock->name;
+        lookupCaller->targets[possibleSrcIDs[i]] = nextBlock->name;
 
         curBlock = nextBlock;
     }
@@ -207,7 +219,7 @@ void ProfVisitor::addDecorator(Function *curr)
     struct CallPath arc = 
     {
         0,
-        getOrAddFuncID(curr->name),
+        getOrAddFuncID(originalFunc->name),
         createGlobal(getModule(), Type::i32, Literal(0)),
         createGlobal(getModule(), Type::f64, Literal(0.0))
     };
@@ -219,6 +231,11 @@ void ProfVisitor::addDecorator(Function *curr)
     curBlock->list.push_back(defaultBlock);
     curBlock->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
     curBlock->list.push_back(createArcCounter(arc.globalCounter));
+
+    //if the src was zero this was an entry, so print results
+    Call *result_call = createCall(getModule()->allocator, Name("_profPrintResult"), 0);
+    curBlock->list.push_back(result_call);
+
     curBlock->list.push_back(ret);
 
     lookupCaller->targets[0] = defaultBlock->name;
@@ -253,10 +270,10 @@ void ProfVisitor::visitFunction(Function *curr)
 
     //adds a decorator (if required) for this function and replaces any 
     //instances where the decorator should be used instead of the original
-    addDecorator(curr);
+    addExportDecorator(curr);
 
     //if exported(and our top level function), add data export at the end
-    if(getModule()->getExportOrNull(curr->name) && !strcmp(curr->name.c_str(), "_main")){ //TODO figure out which function to make top level
+    /*if(getModule()->getExportOrNull(curr->name) && !strcmp(curr->name.c_str(), "_main")){ //TODO figure out which function to make top level
         std::cout << "This function is exported: " << curr->name << std::endl;
         //add call to result function at the end
         Call *result_call = createCall(getModule()->allocator, Name("_profPrintResult"), 0);
@@ -273,12 +290,11 @@ void ProfVisitor::visitFunction(Function *curr)
             funcBlock->list.push_back(ret);
             funcBlock->list.push_back(result_call);
         }
-    }
+    }*/
 }
 
 //adds instructions to block to save call's return value if necessary
 //returns what the call should be replace with (getLocal if it has a return value and nop if it does not have a return value)
-//Expression * ProfVisitor::saveReturn(Block *parentBlk, Expression* currCall, Type returnType)
 Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
 {
     Expression *callReplacement;
@@ -298,20 +314,9 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
     return callReplacement;
 }
 
-//void ProfVisitor::hoistCallNewBlock(Expression* currCall, Name & target, Type returnType, struct CallPath& arc, Expression **newBlockPtr, int newBlockStackLevel)
 void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBlockPtr, int newBlockStackLevel)
 {
     Block *newBlk = new Block(getModule()->allocator);
-
-    // //if calling an imported function, set the lastCaller var
-    // if(getModule()->getFunction(target)->imported()){
-    //     newBlk->list.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(target)))));
-    // }
-
-    // //tracking before function
-    // getFunction()->vars.push_back(Type::f64); //add new local for start time
-    // Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    // newBlk->list.push_back(createStartTime(startTimeLocalIndex));
 
     //everything that should go before the call
     for(Expression *exp : call->beforeCall){
@@ -325,10 +330,6 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
     for(Expression *exp : call->afterCall){
         newBlk->list.push_back(exp);
     }
-
-    // //tracking after function
-    // newBlk->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
-    // newBlk->list.push_back(createArcCounter(arc.globalCounter));
 
     if(*newBlockPtr == call->expression){
         newBlk->list.push_back(callReplacement);
@@ -363,7 +364,6 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
 
 //blk is the block to host the call into
 //first child is the exprssion that contains the call but is a direct child of the block
-//void ProfVisitor::hoistCallExistingBlock(Expression* currCall, Name & target, Type returnType, struct CallPath& arc, Block *blk, Expression *firstChild)
 void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call, 
     Block *blk, Expression *firstChild)
 {
@@ -377,16 +377,6 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
         newBlk->list.push_back(blk->list[blkLoc]);
     }
 
-    // //if calling an imported function, set the lastCaller var
-    // if(getModule()->getFunction(target)->imported()){
-    //     newBlk->list.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(target)))));
-    // }
-
-    // //tracking before function
-    // getFunction()->vars.push_back(Type::f64);
-    // Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    // newBlk->list.push_back(createStartTime(startTimeLocalIndex));
-
     //everything that should go before the call
     for(Expression *exp : call->beforeCall){
         newBlk->list.push_back(exp);
@@ -399,10 +389,6 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
     for(Expression *exp : call->afterCall){
         newBlk->list.push_back(exp);
     }
-
-    // //tracking after function
-    // newBlk->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
-    // newBlk->list.push_back(createArcCounter(arc.globalCounter));
 
     //replace this call with something else since it was moved
     replaceCurrent(callReplacement);
@@ -422,15 +408,6 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
 //this handles instrumenting both Call and CallIndirect instructions once the target is determined
 void ProfVisitor::handleCall(struct GenericCall *genericCall)
 {
-    // struct CallPath arc = 
-    //     {
-    //         getOrAddFuncID(getFunction()->name),
-    //         getOrAddFuncID(target),
-    //         createGlobal(getModule(), Type::i32, Literal(0)),
-    //         createGlobal(getModule(), Type::f64, Literal(0.0))
-    //     };
-    // arcs.push_back(arc);
-
     //search down expression stack to find a parent that is a block (size-2 is call's immediate parent)
     int expStackLevel;
     for(expStackLevel = expressionStack.size() - 2; expStackLevel >= 0; expStackLevel--){
@@ -502,20 +479,37 @@ void ProfVisitor::visitCall(Call *curr)
 
 void ProfVisitor::visitCallIndirect(CallIndirect *curr)
 {
-    //TODO determine target of indirect call
-    //Name tmp = Name("Indirect");
-    //handleCall(curr, tmp, getModule()->getFunctionType(curr->fullType)->result);
+    struct GenericCall genericCall;
+    genericCall.expression = curr;
+    genericCall.returnType = getModule()->getFunctionType(curr->fullType)->result; 
+    
+    genericCall.beforeCall.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(getFunction()->name)))));
+    
+    handleCall(&genericCall);
 }
 
 
 //want list of indirect functions
 void ProfVisitor::visitTable(Table *curr)
 {
+    //map from a function in table to it's decorator
+    std::map<Name, Function *> decoratorMap;
     std::cout << "Visit table" << std::endl;
     for(auto & s : curr->segments){
         std::cout << "Found segment with data: ";
-        for(auto & name : s.data){
+        for(int i = 0; i < s.data.size(); i++){
+            Name name = s.data[i];
             std::cout << name << " ";
+            std::map<Name, Function *>::iterator iter = decoratorMap.find(name);
+            if(iter == decoratorMap.end()){
+                //not in map, create new decorator
+                //TODO figure out which function could call this decorator (ie keep track of the call_indirects and do this last)
+                std::vector<int> possibleSrcFunctions;
+            }
+            else{
+                //already have a decorator, just change out the name
+                s.data[i] = iter->second->name;
+            }
         } 
         std::cout << std::endl;
     }

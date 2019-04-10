@@ -12,6 +12,7 @@ WebAssembly.instantiate = (sourceBuffer, importObject) => { \n\
                                         arcs.push({'src': srcID, 'dest': destID, 'count': callCount, 'time': targetTime}); \n\
                                      }, \n\
                                      printResults: function(){ \n\
+                                         console.log('__RESULTS__'); \n\
                                          arcs.forEach(a => {if(a.count > 0) console.log(a.count + ' calls from ' + " + FUNCMAPNAME+"[a.src] + ' to ' + " + FUNCMAPNAME+"[a.dest] + \n\
                                             ' with ' + a.time.toFixed(3) + ' ms')}); \n\
                                      } }; \n\
