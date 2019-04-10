@@ -3,7 +3,7 @@ const oldInstantiate = WebAssembly.instantiate;
 WebAssembly.instantiate = (sourceBuffer, importObject) => {
     let importObjectWithProfiler = importObject || {};
     var arcs = [];
-    importObjectWithProfiler.prof = {printInt : arg => console.log("Function call count:" + arg), 
+    importObjectWithProfiler.prof = {printInt : arg => console.log("Debug int:" + arg), 
                                      getTime: () => performance.now(), 
                                      updateArc: function(srcID, destID, callCount, targetTime){
                                         arcs.push({"src": srcID, "dest": destID, "count": callCount, "time": targetTime});
