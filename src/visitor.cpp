@@ -16,6 +16,8 @@ std::vector<struct CallPath> arcs;
 
 std::vector<Name> functionImports;
 
+std::vector<Function *> functionsToAdd;
+
 void ProfVisitor::instrument(Module* module)
 {
     //populate functionImports
@@ -30,6 +32,10 @@ void ProfVisitor::instrument(Module* module)
     lastReturn = createGlobal(module, Type::i32, Literal(0));
 
     walkModule(module);
+
+    for(Function *f : functionsToAdd){
+        module->addFunction(f);
+    }
 }
 
 //TODONT when returning from an indirect call, will figure out which arc to increment by looking at the value of lastReturn
@@ -134,7 +140,7 @@ void ProfVisitor::addExportDecorator(Function *originalFunc)
  * both exported functions (called from JS) and 
  * functions in the function table (called with call_indirect)
  */
-void ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::vector<int> possibleSrcIDs)
+Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::vector<int> possibleSrcIDs)
 {
     Function *decorator = new Function();
     decorator->name = decoratorName;
@@ -188,7 +194,12 @@ void ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::
     body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
 
     Switch *lookupCaller = new Switch(getModule()->allocator);
-    lookupCaller->targets.resize(1 + *std::max_element(std::begin(possibleSrcIDs), std::end(possibleSrcIDs)));
+    if(possibleSrcIDs.size() > 0) lookupCaller->targets.resize(1 + *std::max_element(possibleSrcIDs.begin(), possibleSrcIDs.end()));
+    else lookupCaller->targets.resize(1);
+    Name defaultName = Name("defaultSwitch");
+    for(int i = 0; i < lookupCaller->targets.size(); i++){
+        lookupCaller->targets[i] = defaultName;
+    }
     lookupCaller->condition = getLastCaller;
 
     Block *curBlock = body;
@@ -225,25 +236,45 @@ void ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::
     };
     arcs.push_back(arc);
 
-    Block *defaultBlock = new Block(getModule()->allocator);
-    defaultBlock->name = Name("defaultSwitch"); //TODO unique name
-    defaultBlock->list.push_back(lookupCaller);
-    curBlock->list.push_back(defaultBlock);
+    Block *externalBlock = new Block(getModule()->allocator);
+    externalBlock->name = Name("externalArc"); //TODO unique name
+    curBlock->list.push_back(externalBlock);
     curBlock->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
     curBlock->list.push_back(createArcCounter(arc.globalCounter));
-
+    
     //if the src was zero this was an entry, so print results
-    Call *result_call = createCall(getModule()->allocator, Name("_profPrintResult"), 0);
+    Call *result_call = createCall(getModule()->allocator, Name("_profPrintResultInternal"), 0);
     curBlock->list.push_back(result_call);
+    curBlock->list.push_back(ret);
+
+    lookupCaller->targets[0] = externalBlock->name;
+
+    curBlock = externalBlock;
+
+    //error case where we fall through to the default
+    Block *defaultBlock = new Block(getModule()->allocator);
+    defaultBlock->name = defaultName; //TODO unique name
+    defaultBlock->list.push_back(lookupCaller);
+    curBlock->list.push_back(defaultBlock);
+
+    //TODO DEBUG
+    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
 
     curBlock->list.push_back(ret);
 
-    lookupCaller->targets[0] = defaultBlock->name;
     lookupCaller->default_ = defaultBlock->name;
 
-
     //add decorated function to module
-    getModule()->addFunction(decorator);
+    if(decorator == NULL){
+        std::cout << "Error building decorator" << std::endl;
+    }
+    //getModule()->addFunction(decorator);
+    functionsToAdd.push_back(decorator);
+
+    return decorator;
 }
 
 void ProfVisitor::visitFunction(Function *curr)
@@ -271,26 +302,6 @@ void ProfVisitor::visitFunction(Function *curr)
     //adds a decorator (if required) for this function and replaces any 
     //instances where the decorator should be used instead of the original
     addExportDecorator(curr);
-
-    //if exported(and our top level function), add data export at the end
-    /*if(getModule()->getExportOrNull(curr->name) && !strcmp(curr->name.c_str(), "_main")){ //TODO figure out which function to make top level
-        std::cout << "This function is exported: " << curr->name << std::endl;
-        //add call to result function at the end
-        Call *result_call = createCall(getModule()->allocator, Name("_profPrintResult"), 0);
-        
-        //check if last expression is return and put call in front of it
-        Expression *ret = funcBlock->list.back();
-        funcBlock->list.pop_back();
-        if(ret->is<Return>()){
-            funcBlock->list.push_back(result_call);
-            funcBlock->list.push_back(ret);
-        }
-        else{
-            //otherwise put the call last
-            funcBlock->list.push_back(ret);
-            funcBlock->list.push_back(result_call);
-        }
-    }*/
 }
 
 //adds instructions to block to save call's return value if necessary
@@ -299,7 +310,7 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
 {
     Expression *callReplacement;
     //if return type is none or the call will be dropped anyway, then don't save return
-    if(call->returnType == Type::none || getParent()->is<Drop>()){
+    if(call->returnType == Type::none || (getParent() && getParent()->is<Drop>())){
         parentBlk->list.push_back(call->expression); //add to hoist block
         callReplacement = new Nop();;
     }
@@ -477,17 +488,49 @@ void ProfVisitor::visitCall(Call *curr)
     handleCall(&genericCall);
 }
 
+//maps the target type to the possible src functions
+std::map<Name, std::vector<int>> indirectSrcIDs;
+
 void ProfVisitor::visitCallIndirect(CallIndirect *curr)
 {
+    int thisFunctionID = getOrAddFuncID(getFunction()->name);
     struct GenericCall genericCall;
     genericCall.expression = curr;
     genericCall.returnType = getModule()->getFunctionType(curr->fullType)->result; 
     
-    genericCall.beforeCall.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(getFunction()->name)))));
+    genericCall.beforeCall.push_back(createSetGlobal(lastCaller, createConst(Literal(thisFunctionID))));
     
     handleCall(&genericCall);
+
+    //keep track of all call indirects
+    indirectSrcIDs[curr->fullType].push_back(thisFunctionID);
 }
 
+bool typesEqual(FunctionType *type1, FunctionType *type2)
+{
+    if(type1->result != type2->result) return false;
+
+    if(type1->params.size() != type2->params.size()) return false;
+
+    for(int i = 0; i < type1->params.size(); i++){
+        if(type1->params[i] != type2->params[i]) return false;
+    }
+
+    return true;
+}
+
+bool typesEqual(FunctionType *type1, Function *type2)
+{
+    if(type1->result != type2->result) return false;
+
+    if(type1->params.size() != type2->params.size()) return false;
+
+    for(int i = 0; i < type1->params.size(); i++){
+        if(type1->params[i] != type2->params[i]) return false;
+    }
+
+    return true;
+}
 
 //want list of indirect functions
 void ProfVisitor::visitTable(Table *curr)
@@ -498,13 +541,39 @@ void ProfVisitor::visitTable(Table *curr)
     for(auto & s : curr->segments){
         std::cout << "Found segment with data: ";
         for(int i = 0; i < s.data.size(); i++){
-            Name name = s.data[i];
-            std::cout << name << " ";
-            std::map<Name, Function *>::iterator iter = decoratorMap.find(name);
+            Name originalName = s.data[i];
+            std::cout << originalName << " ";
+            std::map<Name, Function *>::iterator iter = decoratorMap.find(originalName);
             if(iter == decoratorMap.end()){
                 //not in map, create new decorator
-                //TODO figure out which function could call this decorator (ie keep track of the call_indirects and do this last)
+                //figure out which function could call this decorator (ie keep track of the call_indirects and do this last)
+                Function *originalFunc = getModule()->getFunction(originalName);
                 std::vector<int> possibleSrcFunctions;
+                for(std::map<Name, std::vector<int>>::iterator it = indirectSrcIDs.begin(); it != indirectSrcIDs.end(); ++it){
+                    FunctionType *indirectType = getModule()->getFunctionType(it->first);
+                    if(originalFunc->type.str){
+                        //function defined with named type
+                        FunctionType *origFuncType = getModule()->getFunctionType(originalFunc->type);
+                        if(typesEqual(indirectType, origFuncType)) possibleSrcFunctions.insert(possibleSrcFunctions.end(), it->second.begin(), it->second.end());
+                    }
+                    else{
+                        //function defined with implicit type
+                        if(typesEqual(indirectType, originalFunc)) possibleSrcFunctions.insert(possibleSrcFunctions.end(), it->second.begin(), it->second.end());
+                    }
+                }
+
+                //generate unique name
+                std::string tmpStr = std::string(originalFunc->name.str);
+                while(getModule()->getFunctionOrNull(Name(tmpStr))){
+                    tmpStr += "_";
+                }
+                Name decoratorName = Name(tmpStr);
+
+                //create actual decorator
+                decoratorMap[originalName] = addDecorator(originalFunc, decoratorName, possibleSrcFunctions);
+
+                //change out the name
+                s.data[i] = decoratorName;
             }
             else{
                 //already have a decorator, just change out the name

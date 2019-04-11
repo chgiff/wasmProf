@@ -23,6 +23,14 @@ void addProfFunctions(Module *mod)
     getTime->result = Type::f64;
     mod->addFunction(getTime);
 
+    //resultsReady function import
+    Function *resultsReady = new Function();
+    resultsReady->name = Name("resultsReady");
+    resultsReady->module = Name("prof");
+    resultsReady->base = Name("resultsReady");
+    resultsReady->result = Type::none;
+    mod->addFunction(resultsReady);
+
     //updateArc function import
     Function *updateArc = new Function();
     updateArc->name = Name("updateArc");
@@ -43,17 +51,18 @@ void addProfFunctions(Module *mod)
 
     //print result function
     Function *printRes = new Function();
-    printRes->name = Name("_profPrintResult");
+    printRes->name = Name("_profPrintResultInternal");
     Block *body = new Block(mod->allocator);
+    //call imported resultsReady function
+    Call *resReadyCall = new Call(mod->allocator);
+    resReadyCall->target = resultsReady->name;
+    body->list.push_back(resReadyCall);
     //update tracking info for each arc by calling out to host
     for(struct CallPath& arc : arcs){
         Call *c = new Call(mod->allocator);
         c->target = updateArc->name;
 
         Const *src = new Const();
-        if(arc.srcFuncID == 0){
-            std::cout << "Error invalid src ID" << std::endl;
-        }
         src->set(Literal(arc.srcFuncID));
         Const *target = new Const();
         target->set(Literal(arc.targetFuncID));
