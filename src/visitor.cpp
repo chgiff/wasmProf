@@ -23,7 +23,7 @@ std::vector<Function *> functionsToAdd;
 
 void ProfVisitor::instrument(Module* module)
 {
-    //prework that needs to happent to each function
+    //prework that needs to happen to each function
     for(auto & func : module->functions){
         //populate functionImports
         if(func->imported()){
@@ -31,8 +31,13 @@ void ProfVisitor::instrument(Module* module)
             functionImports.push_back(func->name);
         }
 
+        //weird case where function body is just nop
+        if(!func->body){
+            Block *newBody = new Block(module->allocator);
+            func->body = newBody;
+        }
         //get rid of implicit returns since they cause problems
-        if(!func->body->is<Block>()){
+        else if(!func->body->is<Block>()){
             Expression *replace = func->body;
             if(func->result != Type::none && !func->body->is<Return>()){
                 Return *ret = new Return();
@@ -125,7 +130,7 @@ void ProfVisitor::addExportDecorator(Function *originalFunc)
 {
     bool exported = false;
     //generate unique name
-    std::string tmpStr = std::string(originalFunc->name.str);
+    std::string tmpStr = std::string(originalFunc->name.str) + "_export";
     while(getModule()->getFunctionOrNull(Name(tmpStr))){
         tmpStr += "_";
     }
@@ -436,17 +441,6 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
 //this handles instrumenting both Call and CallIndirect instructions once the target is determined
 void ProfVisitor::handleCall(struct GenericCall *genericCall)
 {
-    //TODO DEBUG
-    //WasmPrinter::printModule(getModule());
-
-    //if there is an implicit return, make it explicit to avoid issues
-    /*if(getFunction()->result != Type::none && !getFunction()->body->is<Block>()){
-        Return *ret = new Return();
-        ret->value = getFunction()->body;
-        getFunction()->body = ret;
-        expressionStack.insert(expressionStack.begin(), ret);
-    }*/
-    
     //search down expression stack to find a parent that is a block (size-2 is call's immediate parent)
     int expStackLevel;
     for(expStackLevel = expressionStack.size() - 2; expStackLevel >= 0; expStackLevel--){
@@ -591,7 +585,7 @@ void ProfVisitor::visitTable(Table *curr)
                 }
 
                 //generate unique name
-                std::string tmpStr = std::string(originalFunc->name.str);
+                std::string tmpStr = std::string(originalFunc->name.str) + "_indirect";
                 while(getModule()->getFunctionOrNull(Name(tmpStr))){
                     tmpStr += "_";
                 }
