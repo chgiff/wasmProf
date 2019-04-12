@@ -19,9 +19,15 @@ setup:
 test: $(tests_wasm)
 
 $(tests_wasm): 
+	@echo "\n\n\033[0;31mRunning test " $@ "\033[0m\n"
 	node tests/wasm_loader.js $@
 	./wasmProf $@
-	
+	mkdir -p $(dir $@)out
+	mv $(dir $@)prof_* $(dir $@)out/
+	cat $(dir $@)out/prof_$(notdir $@).js > $(dir $@)out/prof_wasm_loader.js 
+	cat tests/wasm_loader.js >> $(dir $@)out/prof_wasm_loader.js
+	node $(dir $@)out/prof_wasm_loader.js $(dir $@)out/prof_$(notdir $@)
+
 
 clean:
 	rm wasmProf

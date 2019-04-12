@@ -1,6 +1,9 @@
 #include "visitor.h"
 #include "ast_gen.h"
 
+//TODO DEBUG
+#include "wasm-io.h"
+
 using namespace wasm;
 
 //global which tracks which function most recently returned (used for tracking indirect call arcs)
@@ -20,11 +23,25 @@ std::vector<Function *> functionsToAdd;
 
 void ProfVisitor::instrument(Module* module)
 {
-    //populate functionImports
+    //prework that needs to happent to each function
     for(auto & func : module->functions){
+        //populate functionImports
         if(func->imported()){
             getOrAddFuncID(func->name);
             functionImports.push_back(func->name);
+        }
+
+        //get rid of implicit returns since they cause problems
+        if(!func->body->is<Block>()){
+            Expression *replace = func->body;
+            if(func->result != Type::none && !func->body->is<Return>()){
+                Return *ret = new Return();
+                ret->value = replace;
+                replace = ret;
+            }
+            Block *newBody = new Block(module->allocator);
+            newBody->list.push_back(replace);
+            func->body = newBody;
         }
     }
 
@@ -419,6 +436,17 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
 //this handles instrumenting both Call and CallIndirect instructions once the target is determined
 void ProfVisitor::handleCall(struct GenericCall *genericCall)
 {
+    //TODO DEBUG
+    //WasmPrinter::printModule(getModule());
+
+    //if there is an implicit return, make it explicit to avoid issues
+    /*if(getFunction()->result != Type::none && !getFunction()->body->is<Block>()){
+        Return *ret = new Return();
+        ret->value = getFunction()->body;
+        getFunction()->body = ret;
+        expressionStack.insert(expressionStack.begin(), ret);
+    }*/
+    
     //search down expression stack to find a parent that is a block (size-2 is call's immediate parent)
     int expStackLevel;
     for(expStackLevel = expressionStack.size() - 2; expStackLevel >= 0; expStackLevel--){

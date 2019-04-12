@@ -122,11 +122,17 @@ int main(int argc, const char* argv[])
 
     //WasmPrinter::printModule(&mod);
 
-    writer.write(mod, "prof_" + std::string(argv[1]));
+    std::string path = std::string(argv[1]);
+    size_t pathBasePos = path.rfind('/');
+    std::string profPath;
+    if(pathBasePos == std::string::npos) profPath = "prof_" + path;
+    else profPath = path.substr(0, pathBasePos+1) + "prof_" + path.substr(pathBasePos+1, path.length()-pathBasePos);
+
+    writer.write(mod, profPath);
 
     //write the accompanying js
     std::ofstream jsFile;
-    jsFile.open("prof_" + std::string(argv[1]) + ".js");
+    jsFile.open(profPath + ".js");
     writeFuncNameMap(jsFile);
     jsFile.close();
 
