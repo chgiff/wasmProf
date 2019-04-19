@@ -23,13 +23,13 @@ void addProfFunctions(Module *mod)
     getTime->result = Type::f64;
     mod->addFunction(getTime);
 
-    //resultsReady function import
-    Function *resultsReady = new Function();
-    resultsReady->name = Name("resultsReady");
-    resultsReady->module = Name("prof");
-    resultsReady->base = Name("resultsReady");
-    resultsReady->result = Type::none;
-    mod->addFunction(resultsReady);
+    //clearResults function import
+    Function *clearResults = new Function();
+    clearResults->name = Name("clearResults");
+    clearResults->module = Name("prof");
+    clearResults->base = Name("clearResults");
+    clearResults->result = Type::none;
+    mod->addFunction(clearResults);
 
     //updateArc function import
     Function *updateArc = new Function();
@@ -53,10 +53,7 @@ void addProfFunctions(Module *mod)
     Function *printRes = new Function();
     printRes->name = Name("_profPrintResultInternal");
     Block *body = new Block(mod->allocator);
-    //call imported resultsReady function
-    Call *resReadyCall = new Call(mod->allocator);
-    resReadyCall->target = resultsReady->name;
-    body->list.push_back(resReadyCall);
+
     //update tracking info for each arc by calling out to host
     for(struct CallPath& arc : arcs){
         Call *c = new Call(mod->allocator);
@@ -117,6 +114,8 @@ int main(int argc, const char* argv[])
         std::cout << "error in parsing input";
     }
 
+
+    v.setDynamicIndirectUpdate();
     v.instrument(&mod);
     addProfFunctions(&mod);
 

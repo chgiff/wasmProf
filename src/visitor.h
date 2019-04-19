@@ -48,7 +48,9 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
     int getOrAddFuncID(wasm::Name name);
 
     void addExportDecorator(wasm::Function *originalFunc);
+    void setDynamicIndirectUpdate(void);
     wasm::Function * addDecorator(wasm::Function *originalFunc, wasm::Name decoratorName, std::vector<int> possibleSrcIDs);
+    wasm::Function *addDynamicDecorator(wasm::Function *originalFunc, wasm::Name decoratorName);
 
     void visitFunction(wasm::Function *curr);
 
@@ -73,6 +75,8 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
 
     //want map: type -> list of functions
     void visitTable(wasm::Table *curr);
+
+    void visitExport(wasm::Export *curr);
 };
 
 #endif

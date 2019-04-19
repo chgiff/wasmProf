@@ -5,6 +5,10 @@ BINARYEN_LIB=$(BINARYEN_ROOT)/lib
 tests_wasm := $(wildcard tests/*/*.wasm) 
 tests_wat := $(tests_wasm:.wasm=.wat)
 
+#executables
+WASM_PROF=./wasmProf
+WASABI=wasabi
+
 .PHONY: all test $(tests_wasm)
 
 all: binaryen
@@ -20,13 +24,27 @@ test: $(tests_wasm)
 
 $(tests_wasm): 
 	@echo "\n\n\033[0;31mRunning test " $@ "\033[0m\n"
-	node tests/wasm_loader.js $@
-	./wasmProf $@
-	mkdir -p $(dir $@)out
-	mv $(dir $@)prof_* $(dir $@)out/
-	cat $(dir $@)out/prof_$(notdir $@).js > $(dir $@)out/prof_wasm_loader.js 
-	cat tests/wasm_loader.js >> $(dir $@)out/prof_wasm_loader.js
-	node $(dir $@)out/prof_wasm_loader.js $(dir $@)out/prof_$(notdir $@)
+	@echo "Baseline:"
+	@node tests/wasm_loader.js $@
+
+	@echo "\nWasmProf:"
+	@$(WASM_PROF) $@ > /dev/null
+	@mkdir -p $(dir $@)wasmProf_out
+	@mv $(dir $@)prof_* $(dir $@)wasmProf_out/
+	@cat $(dir $@)wasmProf_out/prof_$(notdir $@).js > $(dir $@)wasmProf_out/prof_wasm_loader.js 
+	@cat tests/wasm_loader.js >> $(dir $@)wasmProf_out/prof_wasm_loader.js
+	@node $(dir $@)wasmProf_out/prof_wasm_loader.js $(dir $@)wasmProf_out/prof_$(notdir $@)
+
+	@echo "\nWasabi:"
+	@$(WASABI) --hooks=call $@ > /dev/null
+	@mkdir -p $(dir $@)wasabi_out
+	@mv out/* $(dir $@)wasabi_out/
+	@rm -r out
+	@echo 'const { PerformanceObserver, performance } = require("perf_hooks");\nconst Long = require("long");' > $(dir $@)wasabi_out/wasabi_wasm_loader.js 
+	@cat $(dir $@)wasabi_out/$(notdir $(basename $@)).wasabi.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js 
+	@cat tests/call_profile.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js
+	@cat tests/wasm_loader.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js
+	@node $(dir $@)wasabi_out/wasabi_wasm_loader.js $(dir $@)wasabi_out/$(notdir $@)
 
 
 clean:

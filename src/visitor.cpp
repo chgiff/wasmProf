@@ -12,7 +12,11 @@ Name lastCaller;
 
 int curFuncID = 1 ;
 
+//binary function name -> internal function id
 std::map<wasm::Name, int> funcIDs;
+
+//internal name -> external name (there can be more than one external name and it just chooses one)
+std::map<wasm::Name, wasm::Name> exportMap; 
 
 //list of all arcs
 std::vector<struct CallPath> arcs;
@@ -20,6 +24,10 @@ std::vector<struct CallPath> arcs;
 std::vector<Name> functionImports;
 
 std::vector<Function *> functionsToAdd;
+
+//TODO testing this feature
+bool dynamicIndirectUpdate = false;
+bool accumulateResults = false;
 
 void ProfVisitor::instrument(Module* module)
 {
@@ -58,22 +66,36 @@ void ProfVisitor::instrument(Module* module)
     for(Function *f : functionsToAdd){
         module->addFunction(f);
     }
-}
 
-//TODONT when returning from an indirect call, will figure out which arc to increment by looking at the value of lastReturn
-Expression * ProfVisitor::createIndirectLookup(GetLocal *index)
-{
-    /*
-    Table & table = getModule()->table; 
-    for(auto & segment : table.segments){
-        for(Name n : segment.data){
-
+    //if there is no names section, use export names for the functions we can
+    
+    bool hasNames = false;
+    for(UserSection & us : module->userSections){
+        if(us.name == "name"){
+            hasNames = true;
+            break;
         }
     }
-    Switch *sw = new Switch(getModule()->allacator);
-    sw->condition = index;
-    */
+    if(!hasNames){
+        for(const auto &exportName : exportMap){
+            std::map<Name, int>::iterator it;
+            it = funcIDs.find(exportName.first);
+            if(it == funcIDs.end()){
+                std::cout << "Export value error, should not happen" << std::endl;
+            }
+            int idTmp = it->second;
+            funcIDs.erase(it);
+            funcIDs[exportName.second] = idTmp;
+        }
+    }
+    
 }
+
+void ProfVisitor::setDynamicIndirectUpdate()
+{
+    dynamicIndirectUpdate = true;
+}
+
 
 //create a ast subgraph to increment the given global by 1
 Expression * ProfVisitor::createArcCounter(Name globalName)
@@ -182,7 +204,27 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     //save lastCaller locally so it doesn't get overwritten
     decorator->vars.push_back(Type::i32);
     Index lastCallerLocalIndex = decorator->params.size() + decorator->vars.size() - 1;
-    body->list.push_back(createSetLocal(lastCallerLocalIndex, createGetGlobal(lastCaller)));
+    SetLocal* setLastCallerLocal = createSetLocal(lastCallerLocalIndex, createGetGlobal(lastCaller));
+
+    //if the last Caller was 0, this was an entry and we may want to clear previous results
+    if(!accumulateResults){
+        //create if with equality condition lastCaller==0
+        Binary *zeroCheck = new Binary();
+        zeroCheck->op = EqInt32;
+        setLastCallerLocal->type = Type::i32; //this makes it a tee instead of set
+        zeroCheck->left = setLastCallerLocal; 
+        zeroCheck->right = createConst(Literal(0));
+
+        If* lastCallerIf = new If();
+        lastCallerIf->condition = zeroCheck;
+        Call *clearResults = new Call(getModule()->allocator);
+        clearResults->target = Name("clearResults");
+        lastCallerIf->ifTrue = clearResults;
+        body->list.push_back(lastCallerIf);
+    }
+    else{
+        body->list.push_back(setLastCallerLocal);
+    }
 
     //add start time tracking
     decorator->vars.push_back(Type::f64);
@@ -288,6 +330,84 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     curBlock->list.push_back(ret);
 
     lookupCaller->default_ = defaultBlock->name;
+
+    //add decorated function to module
+    if(decorator == NULL){
+        std::cout << "Error building decorator" << std::endl;
+    }
+    //getModule()->addFunction(decorator);
+    functionsToAdd.push_back(decorator);
+
+    return decorator;
+}
+
+/*
+* this decorator calls into the host using updateArc and a count value of one
+* instead of doing the lookup through all posible call sources
+* should reduce binary bloat on large applications
+*/
+Function * ProfVisitor::addDynamicDecorator(Function *originalFunc, Name decoratorName)
+{
+    Function *decorator = new Function();
+    decorator->name = decoratorName;
+
+    //set type same as original
+    decorator->result = originalFunc->result;
+    decorator->params = originalFunc->params;
+    //vars must be a copy because we are going to add vars
+    for(int i = 0; i < originalFunc->vars.size(); i++){
+        decorator->vars.push_back(originalFunc->vars[i]);
+    }
+
+    //create body
+    Block *body  = new Block(getModule()->allocator);
+    decorator->body = body;
+
+    //save lastCaller locally so it doesn't get overwritten
+    decorator->vars.push_back(Type::i32);
+    Index lastCallerLocalIndex = decorator->params.size() + decorator->vars.size() - 1;
+    body->list.push_back(createSetLocal(lastCallerLocalIndex, createGetGlobal(lastCaller)));
+
+    //add start time tracking
+    decorator->vars.push_back(Type::f64);
+    Index startTimeLocalIndex = decorator->params.size() + decorator->vars.size() - 1;
+    body->list.push_back(createStartTime(startTimeLocalIndex));
+
+    //add call back to original function
+    Call *call = createCall(getModule()->allocator, originalFunc->name, 0);
+    for(int i = 0; i < decorator->params.size(); i++){
+        call->operands.push_back(createGetLocal(i));
+    }
+
+    //save call return if not void
+    Return *ret = new Return();
+    if(originalFunc->result == Type::none){
+        body->list.push_back(call);
+    }
+    else{
+        decorator->vars.push_back(originalFunc->result);
+        Index retIndex = decorator->params.size() + decorator->vars.size() - 1;
+        body->list.push_back(createSetLocal(retIndex, call));
+
+        ret->value = createGetLocal(retIndex);
+    }
+
+    //add timing code at end
+    GetLocal *getLastCaller = createGetLocal(lastCallerLocalIndex);
+    Binary *timeDiff = new Binary();
+    timeDiff->op = SubFloat64;
+    timeDiff->left = createCall(getModule()->allocator, Name("getTime"), 0);
+    timeDiff->right = createGetLocal(startTimeLocalIndex);
+    body->list.push_back(createCall(getModule()->allocator, Name("updateArc"), 4, getLastCaller, createConst(Literal(getOrAddFuncID(originalFunc->name))), createConst(Literal(1)), timeDiff));
+
+
+    //TODO DEBUG
+    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCaller));
+    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
+
+    
+
+    body->list.push_back(ret);
 
     //add decorated function to module
     if(decorator == NULL){
@@ -592,7 +712,11 @@ void ProfVisitor::visitTable(Table *curr)
                 Name decoratorName = Name(tmpStr);
 
                 //create actual decorator
-                decoratorMap[originalName] = addDecorator(originalFunc, decoratorName, possibleSrcFunctions);
+                if(dynamicIndirectUpdate){
+                    decoratorMap[originalName] = addDynamicDecorator(originalFunc, decoratorName);
+                } else{
+                    decoratorMap[originalName] = addDecorator(originalFunc, decoratorName, possibleSrcFunctions);
+                }
 
                 //change out the name
                 s.data[i] = decoratorName;
@@ -604,4 +728,9 @@ void ProfVisitor::visitTable(Table *curr)
         } 
         std::cout << std::endl;
     }
+}
+
+void ProfVisitor::visitExport(Export *curr)
+{
+    exportMap[curr->value] = curr->name;
 }

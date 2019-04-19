@@ -8,7 +8,7 @@ WebAssembly.instantiate = (sourceBuffer, importObject) => { \n\
     FUNCMAP + "\n\
     importObjectWithProfiler.prof = {printInt : arg => console.log('Debug int:' + arg), \n\
                                      getTime: () => performance.now(),  \n\
-                                     resultsReady: function(){ arcs = {};}, \n\
+                                     clearResults: function(){ arcs = {};}, \n\
                                      updateArc: function(srcID, destID, callCount, targetTime){ \n\
                                         //arcs.push({'src': srcID, 'dest': destID, 'count': callCount, 'time': targetTime}); \n\
                                         if(arcs[srcID] == undefined) arcs[srcID] = {};\n\
