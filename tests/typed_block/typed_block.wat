@@ -1,0 +1,21 @@
+(module
+ (table 0 anyfunc)
+ (memory $0 1)
+ (export "memory" (memory $0))
+ (export "func1" (func $func1))
+ (export "main" (func $main))
+ (func $func1 (; 0 ;) (param $0 i32) (param $1 i32) (result i32)
+  (i32.mul
+   (get_local $1)
+   (get_local $0)
+  )
+ )
+ (func $main (; 2 ;) (result i32)
+  (block (result i32)
+    (call $func1
+      (i32.const 17)
+      (i32.const 2)
+    )
+  )
+ )
+)

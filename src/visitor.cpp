@@ -18,16 +18,13 @@ std::map<wasm::Name, int> funcIDs;
 //internal name -> external name (there can be more than one external name and it just chooses one)
 std::map<wasm::Name, wasm::Name> exportMap; 
 
-//list of all arcs
-std::vector<struct CallPath> arcs;
+//list of all arcs, hash is (src << 32)+dest which makes it unique for every arc
+std::map<unsigned long, struct CallPath> arcs;
 
 std::vector<Name> functionImports;
 
 std::vector<Function *> functionsToAdd;
 
-//TODO testing this feature
-bool dynamicIndirectUpdate = false;
-bool accumulateResults = false;
 
 void ProfVisitor::instrument(Module* module)
 {
@@ -81,7 +78,8 @@ void ProfVisitor::instrument(Module* module)
             std::map<Name, int>::iterator it;
             it = funcIDs.find(exportName.first);
             if(it == funcIDs.end()){
-                std::cout << "Export value error, should not happen" << std::endl;
+                std::cerr << "Export value error, should not happen" << std::endl;
+                exit(1);
             }
             int idTmp = it->second;
             funcIDs.erase(it);
@@ -91,11 +89,14 @@ void ProfVisitor::instrument(Module* module)
     
 }
 
-void ProfVisitor::setDynamicIndirectUpdate()
+void ProfVisitor::setDynamicIndirectUpdate(bool dynamic)
 {
-    dynamicIndirectUpdate = true;
+    dynamicIndirectUpdate = dynamic;
 }
-
+void ProfVisitor::setDynamicExportUpdate(bool dynamic)
+{
+    dynamicExportUpdate = dynamic;
+}
 
 //create a ast subgraph to increment the given global by 1
 Expression * ProfVisitor::createArcCounter(Name globalName)
@@ -148,6 +149,26 @@ int ProfVisitor::getOrAddFuncID(Name name)
     return it->second;
 }
 
+struct CallPath & ProfVisitor::getOrAddArc(unsigned int srcID, unsigned int destID, unsigned int *globalCounter)
+{
+    unsigned long hash = srcID;
+    hash = (hash << 32) | destID;
+
+    std::map<unsigned long, struct CallPath>::iterator iter = arcs.find(hash);
+    if(iter == arcs.end()){
+        struct CallPath arc = 
+        {
+            srcID,
+            destID,
+            createGlobal(getModule(), Type::i32, Literal(0)),
+            createGlobal(getModule(), Type::f64, Literal(0.0))
+        };
+        *globalCounter += 2;
+        arcs[hash] = arc;
+    }
+    return arcs[hash];
+}
+
 void ProfVisitor::addExportDecorator(Function *originalFunc)
 {
     bool exported = false;
@@ -165,7 +186,7 @@ void ProfVisitor::addExportDecorator(Function *originalFunc)
            //update export to use decorated function call
             e->value = decoratorName;
             exported = true;
-            std::cout << "Updated export with decorator: " << decoratorName << std::endl;
+            //std::cout << "Updated export with decorator: " << decoratorName << std::endl;
         }
     }
 
@@ -175,7 +196,13 @@ void ProfVisitor::addExportDecorator(Function *originalFunc)
         for(Name & import : functionImports){
             possibleSrcIDs.push_back(getOrAddFuncID(import));
         }
-        addDecorator(originalFunc, decoratorName, possibleSrcIDs);
+        if(dynamicExportUpdate){
+            addDynamicDecorator(originalFunc, decoratorName);
+        }
+        else{
+            addDecorator(originalFunc, decoratorName, possibleSrcIDs, &exportedCallGlobalsUsed);
+        }
+        exportedCallDecoratorsUsed++; 
     }
 }
 
@@ -184,7 +211,7 @@ void ProfVisitor::addExportDecorator(Function *originalFunc)
  * both exported functions (called from JS) and 
  * functions in the function table (called with call_indirect)
  */
-Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::vector<int> possibleSrcIDs)
+Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName, std::vector<int> possibleSrcIDs, unsigned int *globalCounter)
 {
     Function *decorator = new Function();
     decorator->name = decoratorName;
@@ -254,8 +281,8 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     GetLocal *getLastCaller = createGetLocal(lastCallerLocalIndex);
 
     //TODO DEBUG
-    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCaller));
-    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
+    //body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCaller));
+    //body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
 
     Switch *lookupCaller = new Switch(getModule()->allocator);
     if(possibleSrcIDs.size() > 0) lookupCaller->targets.resize(1 + *std::max_element(possibleSrcIDs.begin(), possibleSrcIDs.end()));
@@ -268,14 +295,7 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
 
     Block *curBlock = body;
     for(int i = 0; i < possibleSrcIDs.size(); i++){
-        struct CallPath arc = 
-        {
-            possibleSrcIDs[i],
-            getOrAddFuncID(originalFunc->name),
-            createGlobal(getModule(), Type::i32, Literal(0)),
-            createGlobal(getModule(), Type::f64, Literal(0.0))
-        };
-        arcs.push_back(arc);
+        struct CallPath & arc = getOrAddArc(possibleSrcIDs[i], getOrAddFuncID(originalFunc->name), globalCounter);
 
         Block *nextBlock = new Block(getModule()->allocator);
         nextBlock->name = Name::fromInt(i); //TODO unique name
@@ -291,14 +311,8 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
 
     //special case where this is the first call into wasm (lastCaller will be 0)
     //TODO for now I'll lump the default (unknown in with this)
-    struct CallPath arc = 
-    {
-        0,
-        getOrAddFuncID(originalFunc->name),
-        createGlobal(getModule(), Type::i32, Literal(0)),
-        createGlobal(getModule(), Type::f64, Literal(0.0))
-    };
-    arcs.push_back(arc);
+    struct CallPath & arc = getOrAddArc(0, getOrAddFuncID(originalFunc->name), globalCounter);
+
 
     Block *externalBlock = new Block(getModule()->allocator);
     externalBlock->name = Name("externalArc"); //TODO unique name
@@ -333,7 +347,7 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
 
     //add decorated function to module
     if(decorator == NULL){
-        std::cout << "Error building decorator" << std::endl;
+        std::cerr << "Error building decorator" << std::endl;
     }
     //getModule()->addFunction(decorator);
     functionsToAdd.push_back(decorator);
@@ -411,7 +425,7 @@ Function * ProfVisitor::addDynamicDecorator(Function *originalFunc, Name decorat
 
     //add decorated function to module
     if(decorator == NULL){
-        std::cout << "Error building decorator" << std::endl;
+        std::cerr << "Error building decorator" << std::endl;
     }
     //getModule()->addFunction(decorator);
     functionsToAdd.push_back(decorator);
@@ -425,7 +439,6 @@ void ProfVisitor::visitFunction(Function *curr)
     getOrAddFuncID(curr->name);
 
     if(curr->imported()){
-        //std::cout << "import: " << curr->base << " " << curr->module << std::endl;
         return;
     }
 
@@ -454,7 +467,7 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
     //if return type is none or the call will be dropped anyway, then don't save return
     if(call->returnType == Type::none || (getParent() && getParent()->is<Drop>())){
         parentBlk->list.push_back(call->expression); //add to hoist block
-        callReplacement = new Nop();;
+        callReplacement = new Nop();
     }
     //else save the return value
     else{
@@ -501,9 +514,12 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
 
     newBlk->list.push_back(*newBlockPtr); //add old pointer to new block
     *newBlockPtr = newBlk; //do the swap
+
+    
+    pushTask(doPostVisit, (Expression **) newBlockPtr); //push a task for the new block
     pushTask(s.func, &newBlk->list.back()); //push back task with new address of old pointer
     expressionStack.insert(expressionStack.begin()+newBlockStackLevel, newBlk); //fix expression stack
-    expressionStack.pop_back(); //must keep stack consitent with number of tasks in queue
+    //expressionStack.pop_back(); //must keep stack consitent with number of tasks in queue
 
     //push back the other tasks
     while(tmpStack.size() > 0){
@@ -543,12 +559,15 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
         newBlk->list.push_back(exp);
     }
 
-    //replace this call with something else since it was moved
-    replaceCurrent(callReplacement);
-
+    //if call is a direct child of the block, add it's call replacement to the block, put call replacement where is should go
     if(firstChild == call->expression){
-        blkLoc++;
+        blkLoc++; //increment position in old block so call isn't added twice
+        newBlk->list.push_back(callReplacement);
     }
+    else{
+        replaceCurrent(callReplacement);
+    }
+
 
     //fill in rest of the block
     for(; blkLoc < blk->list.size(); blkLoc++){
@@ -584,7 +603,9 @@ void ProfVisitor::handleCall(struct GenericCall *genericCall)
                 continue;
             }
             else{
-                std::cout << "Error matching expression in If" << std::endl;
+                std::cerr << "Error matching expression in If" << std::endl;
+                WasmPrinter::printExpression(expressionStack[expStackLevel], std::cout);
+                exit(1);
             }
         }
         else if(expressionStack[expStackLevel]->is<Loop>()){
@@ -606,14 +627,8 @@ void ProfVisitor::visitCall(Call *curr)
     genericCall.expression = curr;
     genericCall.returnType = getModule()->getFunction(curr->target)->result;
 
-    struct CallPath arc = 
-        {
-            getOrAddFuncID(getFunction()->name),
-            getOrAddFuncID(curr->target),
-            createGlobal(getModule(), Type::i32, Literal(0)),
-            createGlobal(getModule(), Type::f64, Literal(0.0))
-        };
-    arcs.push_back(arc);
+    struct CallPath & arc = getOrAddArc(getOrAddFuncID(getFunction()->name), getOrAddFuncID(curr->target), &regularCallGlobalsUsed);
+
 
     //setup the timing needed before the call
     if(getModule()->getFunction(curr->target)->imported()){
@@ -627,7 +642,7 @@ void ProfVisitor::visitCall(Call *curr)
     genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
     genericCall.afterCall.push_back(createArcCounter(arc.globalCounter));
 
-    handleCall(&genericCall);
+    //handleCall(&genericCall);
 }
 
 //maps the target type to the possible src functions
@@ -679,12 +694,12 @@ void ProfVisitor::visitTable(Table *curr)
 {
     //map from a function in table to it's decorator
     std::map<Name, Function *> decoratorMap;
-    std::cout << "Visit table" << std::endl;
+    //std::cout << "Visit table" << std::endl;
     for(auto & s : curr->segments){
-        std::cout << "Found segment with data: ";
+        //std::cout << "Found segment with data: ";
         for(int i = 0; i < s.data.size(); i++){
             Name originalName = s.data[i];
-            std::cout << originalName << " ";
+            //std::cout << originalName << " ";
             std::map<Name, Function *>::iterator iter = decoratorMap.find(originalName);
             if(iter == decoratorMap.end()){
                 //not in map, create new decorator
@@ -715,8 +730,9 @@ void ProfVisitor::visitTable(Table *curr)
                 if(dynamicIndirectUpdate){
                     decoratorMap[originalName] = addDynamicDecorator(originalFunc, decoratorName);
                 } else{
-                    decoratorMap[originalName] = addDecorator(originalFunc, decoratorName, possibleSrcFunctions);
+                    decoratorMap[originalName] = addDecorator(originalFunc, decoratorName, possibleSrcFunctions, &indirectCallGlobalsUsed);
                 }
+                indirectCallDecoratorsUsed ++;
 
                 //change out the name
                 s.data[i] = decoratorName;
@@ -726,11 +742,21 @@ void ProfVisitor::visitTable(Table *curr)
                 s.data[i] = iter->second->name;
             }
         } 
-        std::cout << std::endl;
+        //std::cout << std::endl;
     }
 }
 
 void ProfVisitor::visitExport(Export *curr)
 {
     exportMap[curr->value] = curr->name;
+}
+
+void ProfVisitor::report()
+{
+    std::cout << "Usage report:" << std::endl;
+    std::cout << "Globals used for regular calls: " << regularCallGlobalsUsed << std::endl;
+    std::cout << "Globals used for calls to exports: " << exportedCallGlobalsUsed << std::endl;
+    std::cout << "Globals used for indirect calls: " << indirectCallGlobalsUsed << std::endl;
+    std::cout << "Decorators added for exported functions: " << exportedCallDecoratorsUsed << std::endl;
+    std::cout << "Decorators added for indirect functions: " << indirectCallDecoratorsUsed << std::endl;
 }

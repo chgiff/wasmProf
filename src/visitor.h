@@ -3,9 +3,12 @@
 
 #include "wasm-traversal.h"
 
+#define MAX_GLOBALS 10000 //set based on v8
+#define MAX_LOCALS 50000 //set based on v8
+
 struct CallPath{
-    int srcFuncID;
-    int targetFuncID;
+    unsigned int srcFuncID;
+    unsigned int targetFuncID;
     wasm::Name globalCounter;
     wasm::Name globalTimeInTarget; //accumulate amount of time spent in target function
 };
@@ -21,14 +24,30 @@ struct GenericCall {
 //give each function a numberic id (zero will signify unknown)
 extern std::map<wasm::Name, int> funcIDs;
 
-//list of all arcs
-extern std::vector<struct CallPath> arcs;
+//list of all arcs, hash is (src << 32)+dest which makes it unique for every arc
+extern std::map<unsigned long, struct CallPath> arcs;
 
 //list of all imported functions
 extern std::vector<wasm::Name> functionImports;
 
 struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
 {
+    //report counters
+    unsigned int regularCallGlobalsUsed = 0;
+    unsigned int indirectCallGlobalsUsed = 0;
+    unsigned int exportedCallGlobalsUsed = 0;
+    unsigned int exportedCallDecoratorsUsed = 0;
+    unsigned int indirectCallDecoratorsUsed = 0;
+    
+    //flags
+    bool dynamicIndirectUpdate = false; //calls to js instead of using LUT for resolving indirect call arcs
+    bool dynamicExportUpdate = false; // calls to js instead of using LUT for resolving (js->exported func) arcs
+    bool accumulateResults = false; //accumulate results through multiple top level calls into wasm (ie more than one main)
+
+    //keeps track of the local index used for startTime (there only needs to be one per function)
+    //-1 means it has not been set yet
+    int curFuncstartTimeIndex = -1;
+
     void instrument(wasm::Module* module);
 
 
@@ -46,10 +65,12 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
     wasm::Expression *createArcTimeAccum(wasm::Name globalName, wasm::Index startTimeLocalIndex);
 
     int getOrAddFuncID(wasm::Name name);
+    struct CallPath & getOrAddArc(unsigned int srcID, unsigned int destID, unsigned int *globalCounter);
 
     void addExportDecorator(wasm::Function *originalFunc);
-    void setDynamicIndirectUpdate(void);
-    wasm::Function * addDecorator(wasm::Function *originalFunc, wasm::Name decoratorName, std::vector<int> possibleSrcIDs);
+    void setDynamicIndirectUpdate(bool dynamic);
+    void setDynamicExportUpdate(bool dynamic);
+    wasm::Function * addDecorator(wasm::Function *originalFunc, wasm::Name decoratorName, std::vector<int> possibleSrcIDs, unsigned int *globalCounter);
     wasm::Function *addDynamicDecorator(wasm::Function *originalFunc, wasm::Name decoratorName);
 
     void visitFunction(wasm::Function *curr);
@@ -77,6 +98,9 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
     void visitTable(wasm::Table *curr);
 
     void visitExport(wasm::Export *curr);
+
+    //report what was added
+    void report();
 };
 
 #endif

@@ -36,7 +36,7 @@ $(tests_wasm):
 	@node $(dir $@)wasmProf_out/prof_wasm_loader.js $(dir $@)wasmProf_out/prof_$(notdir $@)
 
 	@echo "\nWasabi:"
-	@$(WASABI) --hooks=call $@ > /dev/null
+	@$(WASABI) --hooks=call,return $@ > /dev/null
 	@mkdir -p $(dir $@)wasabi_out
 	@mv out/* $(dir $@)wasabi_out/
 	@rm -r out

@@ -1,5 +1,5 @@
 #define JS_SRC(FUNCMAPNAME, FUNCMAP) "\
-const { PerformanceObserver, performance } = require('perf_hooks'); \n\
+if(typeof module !== 'undefined' && module.exports){var p = require('perf_hooks')['performance'];} else{var p = performance;} const performance = p; \n\
 //monkey patch the WASM instantiation to add the imports required by the profiler code \n\
 const oldInstantiate = WebAssembly.instantiate; \n\
 WebAssembly.instantiate = (sourceBuffer, importObject) => { \n\

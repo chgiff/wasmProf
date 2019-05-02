@@ -2,6 +2,7 @@
 #include "wasm-io.h"
 #include "js.h"
 #include "visitor.h"
+#include "wasm-validator.h"
 
 using namespace wasm;
 
@@ -55,7 +56,8 @@ void addProfFunctions(Module *mod)
     Block *body = new Block(mod->allocator);
 
     //update tracking info for each arc by calling out to host
-    for(struct CallPath& arc : arcs){
+    for(auto & pair : arcs){
+        struct CallPath & arc = pair.second;
         Call *c = new Call(mod->allocator);
         c->target = updateArc->name;
 
@@ -100,23 +102,29 @@ int main(int argc, const char* argv[])
 {
     if(argc < 2){
         std::cout << "Usage: "<< argv[0] << " <wasm file>" << std::endl;
+        exit(0);
     }
 
     Module mod;
     ProfVisitor v;
     ModuleReader reader;
     ModuleWriter writer;
+    WasmValidator wasmValid;
 
     try {
         reader.read(argv[1], mod);
     } catch (ParseException& p) {
         p.dump(std::cerr);
-        std::cout << "error in parsing input";
+        std::cerr << "Error in parsing input, Exiting" << std::endl;
+        exit(1);
     }
 
+    wasmValid.validate(mod, FeatureSet::MVP, WasmValidator::FlagValues::Minimal);
 
-    v.setDynamicIndirectUpdate();
+    v.setDynamicIndirectUpdate(true);
+    v.setDynamicExportUpdate(true);
     v.instrument(&mod);
+    v.report();
     addProfFunctions(&mod);
 
     //WasmPrinter::printModule(&mod);
@@ -134,6 +142,8 @@ int main(int argc, const char* argv[])
     jsFile.open(profPath + ".js");
     writeFuncNameMap(jsFile);
     jsFile.close();
+
+    
 
     return 0;
 }
