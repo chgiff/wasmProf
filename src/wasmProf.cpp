@@ -6,7 +6,7 @@
 
 using namespace wasm;
 
-void addProfFunctions(Module *mod)
+void addProfFunctions(Module *mod, bool forcePrint)
 {
     //TODO debugging only
     Function *printInt = new Function();
@@ -32,16 +32,27 @@ void addProfFunctions(Module *mod)
     clearResults->result = Type::none;
     mod->addFunction(clearResults);
 
-    //updateArc function import
-    Function *updateArc = new Function();
-    updateArc->name = Name("updateArc");
-    updateArc->module = Name("prof");
-    updateArc->base = Name("updateArc");
-    updateArc->params.push_back(Type::i32); //src function
-    updateArc->params.push_back(Type::i32); //target function id
-    updateArc->params.push_back(Type::i32); //arc call count
-    updateArc->params.push_back(Type::f64); //target accumulate time //TODO check type
-    mod->addFunction(updateArc);
+    //addArcData function import
+    Function *addArcData = new Function();
+    addArcData->name = Name("addArcData");
+    addArcData->module = Name("prof");
+    addArcData->base = Name("addArcData");
+    addArcData->params.push_back(Type::i32); //src function
+    addArcData->params.push_back(Type::i32); //target function id
+    addArcData->params.push_back(Type::i32); //arc call count
+    addArcData->params.push_back(Type::f64); //target accumulate time //TODO check type
+    mod->addFunction(addArcData);
+
+    //setArcData function import
+    Function *setArcData = new Function();
+    setArcData->name = Name("setArcData");
+    setArcData->module = Name("prof");
+    setArcData->base = Name("setArcData");
+    setArcData->params.push_back(Type::i32); //src function
+    setArcData->params.push_back(Type::i32); //target function id
+    setArcData->params.push_back(Type::i32); //arc call count
+    setArcData->params.push_back(Type::f64); //target accumulate time //TODO check type
+    mod->addFunction(setArcData);
 
     //printResults function import
     Function *printResults = new Function();
@@ -56,10 +67,11 @@ void addProfFunctions(Module *mod)
     Block *body = new Block(mod->allocator);
 
     //update tracking info for each arc by calling out to host
+    // for(struct CallPath & arc : arcs){
     for(auto & pair : arcs){
         struct CallPath & arc = pair.second;
         Call *c = new Call(mod->allocator);
-        c->target = updateArc->name;
+        c->target = setArcData->name;
 
         Const *src = new Const();
         src->set(Literal(arc.srcFuncID));
@@ -76,11 +88,12 @@ void addProfFunctions(Module *mod)
         c->operands.push_back(gTime);
         body->list.push_back(c);
     }
-    //call imported print results function
-    Call *c = new Call(mod->allocator);
-    c->target = printResults->name;
-    body->list.push_back(c);
-
+    if(forcePrint){
+        //call imported print results function
+        Call *c = new Call(mod->allocator);
+        c->target = printResults->name;
+        body->list.push_back(c);
+    }
     printRes->body = body;
     mod->addFunction(printRes);
 }
@@ -88,7 +101,7 @@ void addProfFunctions(Module *mod)
 //write out a js file that declares a json object mapping function id to function name
 void writeFuncNameMap(std::ofstream& jsFile)
 {
-    std::string jsFuncMapName = "fMap";
+    std::string jsFuncMapName = "WasmProf.fMap";
 
     //build the function id -> function name map
     std::string jsFuncMap = jsFuncMapName + "=[]; ";
@@ -100,9 +113,18 @@ void writeFuncNameMap(std::ofstream& jsFile)
 
 int main(int argc, const char* argv[]) 
 {
+    bool forcePrint = false;
+    int fileIndex = 1;
     if(argc < 2){
-        std::cout << "Usage: "<< argv[0] << " <wasm file>" << std::endl;
+        std::cout << "Usage: "<< argv[0] << "[-p] <wasm file>" << std::endl;
+        std::cout << "[-p] force print, cause results to be printed main function exits" << std::endl;
         exit(0);
+    }
+
+    //TODO better argparse
+    if(!strcmp(argv[1], "-p")){
+        forcePrint = true;
+        fileIndex = 2;
     }
 
     Module mod;
@@ -112,7 +134,7 @@ int main(int argc, const char* argv[])
     WasmValidator wasmValid;
 
     try {
-        reader.read(argv[1], mod);
+        reader.read(argv[fileIndex], mod);
     } catch (ParseException& p) {
         p.dump(std::cerr);
         std::cerr << "Error in parsing input, Exiting" << std::endl;
@@ -122,14 +144,14 @@ int main(int argc, const char* argv[])
     wasmValid.validate(mod, FeatureSet::MVP, WasmValidator::FlagValues::Minimal);
 
     v.setDynamicIndirectUpdate(true);
-    v.setDynamicExportUpdate(true);
+    //v.setDynamicExportUpdate(true);
     v.instrument(&mod);
     v.report();
-    addProfFunctions(&mod);
+    addProfFunctions(&mod, forcePrint);
 
     //WasmPrinter::printModule(&mod);
 
-    std::string path = std::string(argv[1]);
+    std::string path = std::string(argv[fileIndex]);
     size_t pathBasePos = path.rfind('/');
     std::string profPath;
     if(pathBasePos == std::string::npos) profPath = "prof_" + path;

@@ -3,7 +3,7 @@
 
 #include "wasm-traversal.h"
 
-#define MAX_GLOBALS 10000 //set based on v8
+#define MAX_GLOBALS 1000000 //set based on v8
 #define MAX_LOCALS 50000 //set based on v8
 
 struct CallPath{
@@ -26,6 +26,7 @@ extern std::map<wasm::Name, int> funcIDs;
 
 //list of all arcs, hash is (src << 32)+dest which makes it unique for every arc
 extern std::map<unsigned long, struct CallPath> arcs;
+// extern std::vector<struct CallPath> arcs; //DEBUG
 
 //list of all imported functions
 extern std::vector<wasm::Name> functionImports;
@@ -38,6 +39,7 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
     unsigned int exportedCallGlobalsUsed = 0;
     unsigned int exportedCallDecoratorsUsed = 0;
     unsigned int indirectCallDecoratorsUsed = 0;
+    unsigned int maxLocalsUsedInAFunction = 0;
     
     //flags
     bool dynamicIndirectUpdate = false; //calls to js instead of using LUT for resolving indirect call arcs
@@ -46,7 +48,7 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
 
     //keeps track of the local index used for startTime (there only needs to be one per function)
     //-1 means it has not been set yet
-    int curFuncstartTimeIndex = -1;
+    int currFuncStartTimeIndex = -1;
 
     void instrument(wasm::Module* module);
 

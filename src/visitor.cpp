@@ -6,6 +6,11 @@
 
 using namespace wasm;
 
+#define DEBUG_SKIP_DECORATOR 0
+#define DEBUG_SKIP_CALL_TRACKING 0
+#define DEBUG_SKIP_INDIRECT_CALL_TRACKING 0
+#define DEBUG_SKIP_NEW_BLOCKS 0
+
 //global which tracks which function most recently returned (used for tracking indirect call arcs)
 Name lastReturn;
 Name lastCaller;
@@ -20,6 +25,7 @@ std::map<wasm::Name, wasm::Name> exportMap;
 
 //list of all arcs, hash is (src << 32)+dest which makes it unique for every arc
 std::map<unsigned long, struct CallPath> arcs;
+// std::vector<struct CallPath> arcs; //DEBUG
 
 std::vector<Name> functionImports;
 
@@ -34,6 +40,12 @@ void ProfVisitor::instrument(Module* module)
         if(func->imported()){
             getOrAddFuncID(func->name);
             functionImports.push_back(func->name);
+
+            //check if this file was already instrumented by looking for prof imports
+            if(func->module == "prof"){
+                std::cerr << "It appears this file has already been instrumented" << std::endl;
+                exit(1);
+            }
         }
 
         //weird case where function body is just nop
@@ -167,10 +179,16 @@ struct CallPath & ProfVisitor::getOrAddArc(unsigned int srcID, unsigned int dest
         arcs[hash] = arc;
     }
     return arcs[hash];
+
+
+    // arcs.push_back(arc);
+    // return arcs.back();
 }
 
 void ProfVisitor::addExportDecorator(Function *originalFunc)
 {
+    if(DEBUG_SKIP_DECORATOR) return;
+
     bool exported = false;
     //generate unique name
     std::string tmpStr = std::string(originalFunc->name.str) + "_export";
@@ -186,7 +204,6 @@ void ProfVisitor::addExportDecorator(Function *originalFunc)
            //update export to use decorated function call
             e->value = decoratorName;
             exported = true;
-            //std::cout << "Updated export with decorator: " << decoratorName << std::endl;
         }
     }
 
@@ -320,9 +337,10 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     curBlock->list.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
     curBlock->list.push_back(createArcCounter(arc.globalCounter));
     
-    //if the src was zero this was an entry, so print results
+    //if the src was zero this was an entry, so print results and reset lastCaller
     Call *result_call = createCall(getModule()->allocator, Name("_profPrintResultInternal"), 0);
     curBlock->list.push_back(result_call);
+    curBlock->list.push_back(createSetGlobal(lastCaller, createConst(Literal(0))));
     curBlock->list.push_back(ret);
 
     lookupCaller->targets[0] = externalBlock->name;
@@ -336,10 +354,10 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     curBlock->list.push_back(defaultBlock);
 
     //TODO DEBUG
-    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
-    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
-    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
-    curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    //curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    //curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    //curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
+    //curBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(0))));
 
     curBlock->list.push_back(ret);
 
@@ -349,14 +367,13 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     if(decorator == NULL){
         std::cerr << "Error building decorator" << std::endl;
     }
-    //getModule()->addFunction(decorator);
     functionsToAdd.push_back(decorator);
 
     return decorator;
 }
 
 /*
-* this decorator calls into the host using updateArc and a count value of one
+* this decorator calls into the host using addArcData and a count value of one
 * instead of doing the lookup through all posible call sources
 * should reduce binary bloat on large applications
 */
@@ -412,14 +429,14 @@ Function * ProfVisitor::addDynamicDecorator(Function *originalFunc, Name decorat
     timeDiff->op = SubFloat64;
     timeDiff->left = createCall(getModule()->allocator, Name("getTime"), 0);
     timeDiff->right = createGetLocal(startTimeLocalIndex);
-    body->list.push_back(createCall(getModule()->allocator, Name("updateArc"), 4, getLastCaller, createConst(Literal(getOrAddFuncID(originalFunc->name))), createConst(Literal(1)), timeDiff));
+    body->list.push_back(createCall(getModule()->allocator, Name("addArcData"), 4, getLastCaller, createConst(Literal(getOrAddFuncID(originalFunc->name))), createConst(Literal(1)), timeDiff));
 
 
     //TODO DEBUG
-    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCaller));
-    body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
+    //body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, getLastCaller));
+    //body->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(originalFunc->name)))));
 
-    
+    //TODO check for lastCaller==0 but probably only in the exported function case
 
     body->list.push_back(ret);
 
@@ -454,9 +471,15 @@ void ProfVisitor::visitFunction(Function *curr)
     }
     curr->body = funcBlock;
 
+    //reset the start time index since this is the end of this function
+    currFuncStartTimeIndex = -1;
+
     //adds a decorator (if required) for this function and replaces any 
     //instances where the decorator should be used instead of the original
     addExportDecorator(curr);
+
+    //see how many locals this function uses now
+    if(curr->getNumLocals() > maxLocalsUsedInAFunction) maxLocalsUsedInAFunction = curr->getNumLocals();
 }
 
 //adds instructions to block to save call's return value if necessary
@@ -520,6 +543,7 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
     pushTask(s.func, &newBlk->list.back()); //push back task with new address of old pointer
     expressionStack.insert(expressionStack.begin()+newBlockStackLevel, newBlk); //fix expression stack
     //expressionStack.pop_back(); //must keep stack consitent with number of tasks in queue
+    //TODO still not sure about this ^^
 
     //push back the other tasks
     while(tmpStack.size() > 0){
@@ -592,10 +616,12 @@ void ProfVisitor::handleCall(struct GenericCall *genericCall)
             If *ifExp = expressionStack[expStackLevel]->dynCast<If>();
             //check where in the if
             if(expressionStack[expStackLevel + 1] == ifExp->ifTrue){
+                if(DEBUG_SKIP_NEW_BLOCKS) return;
                 hoistCallNewBlock(genericCall, &ifExp->ifTrue, expStackLevel + 1);
                 return;
             }
             else if(expressionStack[expStackLevel + 1] == ifExp->ifFalse){
+                if(DEBUG_SKIP_NEW_BLOCKS) return;
                 hoistCallNewBlock(genericCall, &ifExp->ifFalse, expStackLevel + 1);
                 return;
             }
@@ -609,6 +635,7 @@ void ProfVisitor::handleCall(struct GenericCall *genericCall)
             }
         }
         else if(expressionStack[expStackLevel]->is<Loop>()){
+            if(DEBUG_SKIP_NEW_BLOCKS) return;
             Loop *loopExp = expressionStack[expStackLevel]->dynCast<Loop>();
             hoistCallNewBlock(genericCall, &loopExp->body, expStackLevel + 1);
             return;
@@ -617,12 +644,15 @@ void ProfVisitor::handleCall(struct GenericCall *genericCall)
     if(expStackLevel < 0){
         //failed to find suitable block or control flow location
         //must replace function body with new block
+        if(DEBUG_SKIP_NEW_BLOCKS) return;
         hoistCallNewBlock(genericCall, &(getFunction()->body), 0);
     }
 }
 
 void ProfVisitor::visitCall(Call *curr)
 {
+    if(DEBUG_SKIP_CALL_TRACKING) return;
+
     struct GenericCall genericCall;
     genericCall.expression = curr;
     genericCall.returnType = getModule()->getFunction(curr->target)->result;
@@ -634,15 +664,21 @@ void ProfVisitor::visitCall(Call *curr)
     if(getModule()->getFunction(curr->target)->imported()){
         genericCall.beforeCall.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(curr->target)))));
     }
-    getFunction()->vars.push_back(Type::f64);
-    Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    genericCall.beforeCall.push_back(createStartTime(startTimeLocalIndex));
+    // getFunction()->vars.push_back(Type::f64);
+    // Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
+    // genericCall.beforeCall.push_back(createStartTime(startTimeLocalIndex));
+    if(currFuncStartTimeIndex == -1){
+        getFunction()->vars.push_back(Type::f64);
+        currFuncStartTimeIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
+    }
+    genericCall.beforeCall.push_back(createStartTime(currFuncStartTimeIndex));
 
     //setup the timing needed after the call
-    genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
+    // genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
+    genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, currFuncStartTimeIndex)); //DEBUG
     genericCall.afterCall.push_back(createArcCounter(arc.globalCounter));
 
-    //handleCall(&genericCall);
+    handleCall(&genericCall);
 }
 
 //maps the target type to the possible src functions
@@ -650,6 +686,8 @@ std::map<Name, std::vector<int>> indirectSrcIDs;
 
 void ProfVisitor::visitCallIndirect(CallIndirect *curr)
 {
+    if(DEBUG_SKIP_INDIRECT_CALL_TRACKING) return;
+
     int thisFunctionID = getOrAddFuncID(getFunction()->name);
     struct GenericCall genericCall;
     genericCall.expression = curr;
@@ -692,14 +730,13 @@ bool typesEqual(FunctionType *type1, Function *type2)
 //want list of indirect functions
 void ProfVisitor::visitTable(Table *curr)
 {
+    if(DEBUG_SKIP_DECORATOR) return;
+
     //map from a function in table to it's decorator
     std::map<Name, Function *> decoratorMap;
-    //std::cout << "Visit table" << std::endl;
     for(auto & s : curr->segments){
-        //std::cout << "Found segment with data: ";
         for(int i = 0; i < s.data.size(); i++){
             Name originalName = s.data[i];
-            //std::cout << originalName << " ";
             std::map<Name, Function *>::iterator iter = decoratorMap.find(originalName);
             if(iter == decoratorMap.end()){
                 //not in map, create new decorator
@@ -742,7 +779,6 @@ void ProfVisitor::visitTable(Table *curr)
                 s.data[i] = iter->second->name;
             }
         } 
-        //std::cout << std::endl;
     }
 }
 
@@ -759,4 +795,5 @@ void ProfVisitor::report()
     std::cout << "Globals used for indirect calls: " << indirectCallGlobalsUsed << std::endl;
     std::cout << "Decorators added for exported functions: " << exportedCallDecoratorsUsed << std::endl;
     std::cout << "Decorators added for indirect functions: " << indirectCallDecoratorsUsed << std::endl;
+    std::cout << "The max number of locals used in a function: " << maxLocalsUsedInAFunction << std::endl;
 }
