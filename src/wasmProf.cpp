@@ -3,6 +3,9 @@
 #include "js.h"
 #include "visitor.h"
 #include "wasm-validator.h"
+#include "ast_gen.h"
+
+#define WASI_EXPERIMENTAL 0
 
 using namespace wasm;
 
@@ -98,6 +101,65 @@ void addProfFunctions(Module *mod, bool forcePrint)
     mod->addFunction(printRes);
 }
 
+void addWasiFunctionExperimental(Module *mod)
+{
+    Function *getTime = wasi_getTime(mod);
+    getTime->name = Name("getTime");
+
+    Function *importedClockTime = new Function();
+    importedClockTime->name = Name("clock_time_get");
+    importedClockTime->base = Name("clock_time_get");
+    importedClockTime->module = Name("wasi_unstable");
+    importedClockTime->params.push_back(Type::i32);
+    importedClockTime->params.push_back(Type::i64);
+    importedClockTime->params.push_back(Type::i32);
+    importedClockTime->result = Type::i32;
+
+    mod->addFunction(getTime);
+    mod->addFunction(importedClockTime);
+
+
+    //stub for other prof functions
+    Function *printRes = new Function();
+    printRes->name = Name("_profPrintResultInternal");
+    printRes->body = new Nop();
+    mod->addFunction(printRes);
+
+    //clearResults function import
+    Function *clearResults = new Function();
+    clearResults->name = Name("clearResults");
+    clearResults->result = Type::none;
+    clearResults->body = new Nop();
+    mod->addFunction(clearResults);
+
+    //addArcData function import
+    Function *addArcData = new Function();
+    addArcData->name = Name("addArcData");
+    addArcData->params.push_back(Type::i32); //src function
+    addArcData->params.push_back(Type::i32); //target function id
+    addArcData->params.push_back(Type::i32); //arc call count
+    addArcData->params.push_back(Type::f64); //target accumulate time //TODO check type
+    addArcData->body = new Nop();
+    mod->addFunction(addArcData);
+
+    //setArcData function import
+    Function *setArcData = new Function();
+    setArcData->name = Name("setArcData");
+    setArcData->params.push_back(Type::i32); //src function
+    setArcData->params.push_back(Type::i32); //target function id
+    setArcData->params.push_back(Type::i32); //arc call count
+    setArcData->params.push_back(Type::f64); //target accumulate time //TODO check type
+    setArcData->body = new Nop();
+    mod->addFunction(setArcData);
+
+    //TODO debugging only
+    Function *printInt = new Function();
+    printInt->name = Name("printInt");
+    printInt->params.push_back(Type::i32);
+    printInt->body = new Nop();
+    mod->addFunction(printInt);
+}
+
 //write out a js file that declares a json object mapping function id to function name
 void writeFuncNameMap(std::ofstream& jsFile)
 {
@@ -147,8 +209,12 @@ int main(int argc, const char* argv[])
     //v.setDynamicExportUpdate(true);
     v.instrument(&mod);
     v.report();
-    addProfFunctions(&mod, forcePrint);
-
+    if(WASI_EXPERIMENTAL){
+        addWasiFunctionExperimental(&mod);
+    }
+    else{
+        addProfFunctions(&mod, forcePrint);
+    }
     //WasmPrinter::printModule(&mod);
 
     std::string path = std::string(argv[fileIndex]);

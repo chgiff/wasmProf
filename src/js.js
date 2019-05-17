@@ -1,5 +1,5 @@
 //this should match what is in js.h
-if (typeof window == 'undefined') {
+if (typeof window == 'undefined' && typeof module !== 'undefined') {
     var performance = require('perf_hooks')['performance'];
 }
 //monkey patch the WASM instantiation to add the imports required by the profiler code 
@@ -11,6 +11,12 @@ let WasmProf = {
             this.dynamicCount = 0;
             this.time = time;
             this.dynamicTime = 0;
+        }
+        clone(){
+            var copy = new WasmProf.Arc(this.count, this.time);
+            copy.dynamicCount = this.dynamicCount;
+            copy.dynamicTime = this.dynamicCount;
+            return copy;
         }
     },
     fMap: [], //pregenerated function map
@@ -30,7 +36,6 @@ let WasmProf = {
             this.children = [];
             this.parents = [];
         }
-
         clone() {
             var copy = new WasmProf.FunctionResult(this.name);
             copy.selfTime = this.selfTime;
@@ -53,17 +58,65 @@ let WasmProf = {
             } else {
                 this.funcResults = funcResultArr;
             }
+
+            //get the 0th element which is the 'external' function
+            this.external = this.funcResults.shift();
+            //remove everything not called
+            this.funcResults = this.funcResults.filter(elem => elem.called > 0);
+
+            //create sorted arrays
+            this.selfTimeSort = this.funcResults.slice();
+            this.selfTimeSort.sort((a,b) => b.selfTime - a.selfTime);
+            this.cumulativeTimeSort = this.funcResults.slice();
+            this.cumulativeTimeSort.sort((a,b) => b.cumulativeTime - a.cumulativeTime);
         }
 
         flatProfile(count) {
-            this.funcResults.sort(function(a, b) {
-                b.selfTime - a.selfTime
-            });
+            var totTime = (-1 * this.external.selfTime);
+            console.log('Total time: ' + totTime);
+            console.log(' % \tcumulative\tself\tcalled\tname');
+            for (var i = 0; i < this.selfTimeSort.length && count != 0; i++) {
+                if (this.selfTimeSort[i] != undefined && this.selfTimeSort[i].called > 0) {
+                    console.log((100*this.selfTimeSort[i].selfTime/totTime).toFixed(2) + '\t' + this.selfTimeSort[i].cumulativeTime.toFixed(3) + '\t\t' + this.selfTimeSort[i].selfTime.toFixed(3) + '\t' + this.selfTimeSort[i].called + '\t' + this.selfTimeSort[i].name);
+                    count--;
+                }
+            }
+        }
 
-            console.log("\tcummulative\tself\tcalled\tname");
-            for (i = 0; i < this.funcResults.length && count != 0; i++) {
-                if (this.funcResults[i] != undefined && this.funcResults[i] > 0) {
-                    console.log("\t" + this.funcResults[i].cumulativeTime.toFixed(3) + "\t\t" + this.funcResults[i].selfTime.toFixed(3) + "\t" + this.funcResults[i].called + "\t" + this.funcResults[i].name);
+        callGraph(count) {
+            function printParent(parent){
+                if(parent.function.index == undefined) console.log('\t\t\t\t\t\t  <spontaneous>');
+                else {
+                    var parentCount = (parent.arc.count + parent.arc.dynamicCount);
+                    var parentSelf = curFunc.selfTime * parentCount / curFunc.called;
+                    var parentChildren = (curFunc.cumulativeTime - curFunc.selfTime) * parentCount / curFunc.called;
+                    console.log('\t\t' + parentSelf.toFixed(3) + '\t' + parentChildren.toFixed(3) + '\t\t' + parentCount + '/' + curFunc.called + '\t' + 
+                        parent.function.name + ' ['+parent.function.index+']');
+                }
+            }
+            function printChild(child){
+                var childCount = (child.arc.count + child.arc.dynamicCount);
+                var childSelf = child.function.selfTime * childCount / curFunc.called;
+                var childChildren = (child.function.cumulativeTime - child.function.selfTime) * childCount / curFunc.called;
+                console.log('\t\t' + childSelf.toFixed(3) + '\t' + childChildren.toFixed(3) + '\t\t' + childCount + '/' + child.function.called + '\t' + 
+                        child.function.name + ' ['+child.function.index+']');
+            }
+
+            if(count == undefined) count = 5; //default of 5 entries
+
+            for(var i = 0; i < this.cumulativeTimeSort.length; i++){
+                if(this.cumulativeTimeSort[i] != undefined && this.cumulativeTimeSort[i].called > 0) this.cumulativeTimeSort[i].index = i;
+            }
+            var totTime = (-1 * this.external.selfTime);
+            console.log('index\t% time\tself\tchildren\tcalled\tname');
+            for(var i = 0; i < this.cumulativeTimeSort.length && count != 0; i++){
+                var curFunc = this.cumulativeTimeSort[i];
+                if(curFunc != undefined && curFunc.called > 0){
+                    curFunc.parents.forEach(printParent);
+                    console.log('['+curFunc.index+']' + '\t' + (100*curFunc.cumulativeTime/totTime).toFixed(2) + '\t' + curFunc.selfTime.toFixed(3) + '\t' +
+                        (curFunc.cumulativeTime - curFunc.selfTime).toFixed(3) + '\t\t' + curFunc.called + '\t' + curFunc.name);
+                    curFunc.children.forEach(printChild);
+                    console.log('--------------------------------------------------');
                     count--;
                 }
             }
@@ -81,17 +134,21 @@ let WasmProf = {
                 if (functions[d] == undefined) {
                     functions[d] = new WasmProf.FunctionResult(WasmProf.fMap[d]);
                 }
-                functions[s].children.push(d);
-                functions[s].selfTime -= WasmProf.arcs[s][d].time;
+                var count = WasmProf.arcs[s][d].count + WasmProf.arcs[s][d].dynamicCount;
+                var time = WasmProf.arcs[s][d].time + WasmProf.arcs[s][d].dynamicTime;
+                if(count > 0){
+                    functions[s].children.push({function: functions[d], arc: WasmProf.arcs[s][d].clone()});
+                    functions[s].selfTime -= time;
 
-                functions[d].cumulativeTime += WasmProf.arcs[s][d].time;
-                functions[d].selfTime += WasmProf.arcs[s][d].time;
-                functions[d].called += WasmProf.arcs[s][d].count;
-                functions[d].parents.push(s);
+                    functions[d].cumulativeTime += time;
+                    functions[d].selfTime += time;
+                    functions[d].called += count;
+                    functions[d].parents.push({function: functions[s], arc: WasmProf.arcs[s][d].clone()});
+                }
             }
         }
 
-        return new Results(functions);
+        return new WasmProf.Results(functions);
     }
 };
 WasmProf.fMap = [];

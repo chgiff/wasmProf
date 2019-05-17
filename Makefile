@@ -24,27 +24,29 @@ test: $(tests_wasm)
 
 $(tests_wasm): 
 	@echo "\n\n\033[0;31mRunning test " $@ "\033[0m\n"
-	@echo "Baseline:"
-	@node tests/wasm_loader.js $@
-
-	@echo "\nWasmProf:"
-	@$(WASM_PROF) $@ > /dev/null
-	@mkdir -p $(dir $@)wasmProf_out
-	@mv $(dir $@)prof_* $(dir $@)wasmProf_out/
-	@cat $(dir $@)wasmProf_out/prof_$(notdir $@).js > $(dir $@)wasmProf_out/prof_wasm_loader.js 
-	@cat tests/wasm_loader.js >> $(dir $@)wasmProf_out/prof_wasm_loader.js
-	@node $(dir $@)wasmProf_out/prof_wasm_loader.js $(dir $@)wasmProf_out/prof_$(notdir $@)
-
-	@echo "\nWasabi:"
-	@$(WASABI) --hooks=call,return $@ > /dev/null
-	@mkdir -p $(dir $@)wasabi_out
-	@mv out/* $(dir $@)wasabi_out/
-	@rm -r out
-	@echo 'const { PerformanceObserver, performance } = require("perf_hooks");\nconst Long = require("long");' > $(dir $@)wasabi_out/wasabi_wasm_loader.js 
-	@cat $(dir $@)wasabi_out/$(notdir $(basename $@)).wasabi.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js 
-	@cat tests/call_profile.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js
-	@cat tests/wasm_loader.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js
-	@node $(dir $@)wasabi_out/wasabi_wasm_loader.js $(dir $@)wasabi_out/$(notdir $@)
+	@#echo "Baseline:"
+	@#node tests/wasm_loader.js $@
+	@#echo "\nWasmProf:"
+	@#$(WASM_PROF) -p $@ > /dev/null
+	@#mkdir -p $(dir $@)wasmProf_out
+	@#mv $(dir $@)prof_* $(dir $@)wasmProf_out/
+	@#cat $(dir $@)wasmProf_out/prof_$(notdir $@).js > $(dir $@)wasmProf_out/prof_wasm_loader.js 
+	@#cat tests/wasm_loader.js >> $(dir $@)wasmProf_out/prof_wasm_loader.js
+	@#node $(dir $@)wasmProf_out/prof_wasm_loader.js $(dir $@)wasmProf_out/prof_$(notdir $@)
+	@#echo "\nWasabi:"
+	@#$(WASABI) --hooks=call,return $@ > /dev/null
+	@#mkdir -p $(dir $@)wasabi_out
+	@#mv out/* $(dir $@)wasabi_out/
+	@#rm -r out
+	@#echo 'const { PerformanceObserver, performance } = require("perf_hooks");\nconst Long = require("long");' > $(dir $@)wasabi_out/wasabi_wasm_loader.js 
+	@#cat $(dir $@)wasabi_out/$(notdir $(basename $@)).wasabi.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js 
+	@#cat tests/call_profile.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js
+	@#cat tests/wasm_loader.js >> $(dir $@)wasabi_out/wasabi_wasm_loader.js
+	@#node $(dir $@)wasabi_out/wasabi_wasm_loader.js $(dir $@)wasabi_out/$(notdir $@)
+	
+	@echo "var filename = \"$(notdir $@)\";" > $@.js
+	@cat tests/wasm_loader.js >> $@.js
+	./run_test.py --wasmProf $(WASM_PROF) --wasabi $(WASABI) --wasabi_js tests/call_profile.js --wasm_validate ../wabt/bin/wasm-validate $@ $@.js
 
 
 clean:

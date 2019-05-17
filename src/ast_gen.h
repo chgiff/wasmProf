@@ -16,4 +16,6 @@ extern GetLocal *createGetLocal(int index);
 extern SetLocal *createSetLocal(int index, Expression *value);
 
 extern Name createGlobal(Module *module, Type type, Literal initialValue);
+
+extern Function *wasi_getTime(Module *module);
 #endif

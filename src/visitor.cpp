@@ -784,7 +784,7 @@ void ProfVisitor::visitTable(Table *curr)
 
 void ProfVisitor::visitExport(Export *curr)
 {
-    exportMap[curr->value] = curr->name;
+    if(curr->kind == ExternalKind::Function) exportMap[curr->value] = curr->name;
 }
 
 void ProfVisitor::report()
