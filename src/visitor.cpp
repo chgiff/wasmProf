@@ -10,12 +10,13 @@ using namespace wasm;
 #define DEBUG_SKIP_CALL_TRACKING 0
 #define DEBUG_SKIP_INDIRECT_CALL_TRACKING 0
 #define DEBUG_SKIP_NEW_BLOCKS 0
+#define DEBUG_AVOID_HOISTING 1
 
 //global which tracks which function most recently returned (used for tracking indirect call arcs)
 Name lastReturn;
 Name lastCaller;
 
-int curFuncID = 1 ;
+int curFuncID = 1;
 
 //binary function name -> internal function id
 std::map<wasm::Name, int> funcIDs;
@@ -488,10 +489,16 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
 {
     Expression *callReplacement;
     //if return type is none or the call will be dropped anyway, then don't save return
-    if(call->returnType == Type::none || (getParent() && getParent()->is<Drop>())){
+    if(call->returnType == Type::none){
         parentBlk->list.push_back(call->expression); //add to hoist block
         callReplacement = new Nop();
     }
+    // else if((getParent() && getParent()->is<Drop>())){
+    //     Drop *drop = new Drop();
+    //     drop->value = call->expression;
+    //     parentBlk->list.push_back(drop);
+    //     callReplacement = createConst(Literal(0));
+    // }
     //else save the return value
     else{
         getFunction()->vars.push_back(call->returnType); 
@@ -505,6 +512,36 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
 
 void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBlockPtr, int newBlockStackLevel)
 {
+    if(DEBUG_AVOID_HOISTING){
+        Block *insideBlk = new Block(getModule()->allocator);
+        //everything that should go before the call
+        for(Expression *exp : call->beforeCall){
+            insideBlk->list.push_back(exp);
+        }
+
+        Index ind;
+        if(call->returnType == wasm::none){
+            insideBlk->list.push_back(call->expression);
+        }
+        else{
+            getFunction()->vars.push_back(call->returnType); 
+            ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
+            insideBlk->list.push_back(createSetLocal(ind, call->expression)); //add to hoist block
+        }
+        //everything that should go after the call
+        for(Expression *exp : call->afterCall){
+            insideBlk->list.push_back(exp);
+        }
+        if(call->returnType != wasm::none){
+            insideBlk->list.push_back(createGetLocal(ind));
+            insideBlk->type = call->returnType;
+        }
+
+        replaceCurrent(insideBlk);
+
+        return;
+    }
+
     Block *newBlk = new Block(getModule()->allocator);
 
     //everything that should go before the call
@@ -569,29 +606,56 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
         }
         newBlk->list.push_back(blk->list[blkLoc]);
     }
-
-    //everything that should go before the call
-    for(Expression *exp : call->beforeCall){
-        newBlk->list.push_back(exp);
-    }
-
-    //save call return in a local if not void, and add call to block
-    Expression *callReplacement = saveReturn(newBlk, call);
-
-    //everything that should go after the call
-    for(Expression *exp : call->afterCall){
-        newBlk->list.push_back(exp);
-    }
-
-    //if call is a direct child of the block, add it's call replacement to the block, put call replacement where is should go
+    
+    //call is already in the block
     if(firstChild == call->expression){
-        blkLoc++; //increment position in old block so call isn't added twice
-        newBlk->list.push_back(callReplacement);
+        //everything that should go before the call
+        for(Expression *exp : call->beforeCall){
+            newBlk->list.push_back(exp);
+        }
+
+        newBlk->list.push_back(call->expression);
+        blkLoc++;
+
+        //everything that should go after the call
+        for(Expression *exp : call->afterCall){
+           newBlk->list.push_back(exp);
+        }
     }
     else{
-        replaceCurrent(callReplacement);
-    }
+        if(DEBUG_AVOID_HOISTING){
+            newBlk->list.push_back(blk->list[blkLoc]);//DEBUG
+            blkLoc++;
+            Block *insideBlk = new Block(getModule()->allocator);
+            //everything that should go before the call
+            for(Expression *exp : call->beforeCall){
+                insideBlk->list.push_back(exp);
+            }
+            getFunction()->vars.push_back(call->returnType); 
+            Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
+            insideBlk->list.push_back(createSetLocal(ind, call->expression)); //add to hoist block
 
+            //everything that should go after the call
+            for(Expression *exp : call->afterCall){
+                insideBlk->list.push_back(exp);
+            }
+            insideBlk->list.push_back(createGetLocal(ind));
+            insideBlk->type = call->returnType;
+            replaceCurrent(insideBlk);
+        }
+        else{
+            //everything that should go before the call
+            for(Expression *exp : call->beforeCall){
+                newBlk->list.push_back(exp);
+            }
+            Expression *callReplacement = saveReturn(newBlk, call);
+            replaceCurrent(callReplacement);
+            //everything that should go after the call
+            for(Expression *exp : call->afterCall){
+                newBlk->list.push_back(exp);
+            }
+        }
+    }
 
     //fill in rest of the block
     for(; blkLoc < blk->list.size(); blkLoc++){
@@ -664,18 +728,18 @@ void ProfVisitor::visitCall(Call *curr)
     if(getModule()->getFunction(curr->target)->imported()){
         genericCall.beforeCall.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(curr->target)))));
     }
-    // getFunction()->vars.push_back(Type::f64);
-    // Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    // genericCall.beforeCall.push_back(createStartTime(startTimeLocalIndex));
-    if(currFuncStartTimeIndex == -1){
-        getFunction()->vars.push_back(Type::f64);
-        currFuncStartTimeIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    }
-    genericCall.beforeCall.push_back(createStartTime(currFuncStartTimeIndex));
+    getFunction()->vars.push_back(Type::f64);
+    Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
+    genericCall.beforeCall.push_back(createStartTime(startTimeLocalIndex));
+    // if(currFuncStartTimeIndex == -1){
+    //     getFunction()->vars.push_back(Type::f64);
+    //     currFuncStartTimeIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
+    // }
+    // genericCall.beforeCall.push_back(createStartTime(currFuncStartTimeIndex));
 
     //setup the timing needed after the call
-    // genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
-    genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, currFuncStartTimeIndex)); //DEBUG
+    genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
+    // genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, currFuncStartTimeIndex)); //DEBUG
     genericCall.afterCall.push_back(createArcCounter(arc.globalCounter));
 
     handleCall(&genericCall);

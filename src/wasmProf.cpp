@@ -206,7 +206,7 @@ int main(int argc, const char* argv[])
     wasmValid.validate(mod, FeatureSet::MVP, WasmValidator::FlagValues::Minimal);
 
     v.setDynamicIndirectUpdate(true);
-    //v.setDynamicExportUpdate(true);
+    // v.setDynamicExportUpdate(true);
     v.instrument(&mod);
     v.report();
     if(WASI_EXPERIMENTAL){
