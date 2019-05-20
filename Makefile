@@ -14,6 +14,9 @@ WASABI=wasabi
 all: binaryen
 	g++ -I$(BINARYEN_INC) -g -std=c++11 -o wasmProf src/*.cpp -rdynamic $(BINARYEN_LIB)/libwasm.a $(BINARYEN_LIB)/libasmjs.a $(BINARYEN_LIB)/libemscripten-optimizer.a $(BINARYEN_LIB)/libpasses.a $(BINARYEN_LIB)/libir.a $(BINARYEN_LIB)/libcfg.a $(BINARYEN_LIB)/libsupport.a $(BINARYEN_LIB)/libwasm.a -pthread
 
+wasm:
+	mkdir -p build_wasm
+	emcc -I$(BINARYEN_INC) -g -std=c++11 -s WASM=1 -s -o build/wasmProf.js src/*.cpp ext/binaryen/src/wasm/*.cpp ext/binaryen/src/support/*.cpp ext/binaryen/src/passes/*.cpp ext/binaryen/src/ir/*.cpp ext/binaryen/src/cfg/*.cpp
 binaryen:
 	cd ext/binaryen && $(MAKE)
 

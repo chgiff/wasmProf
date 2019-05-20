@@ -10,7 +10,8 @@ using namespace wasm;
 #define DEBUG_SKIP_CALL_TRACKING 0
 #define DEBUG_SKIP_INDIRECT_CALL_TRACKING 0
 #define DEBUG_SKIP_NEW_BLOCKS 0
-#define DEBUG_AVOID_HOISTING 1
+#define DEBUG_AVOID_HOISTING_NEW_BLOCKS 0
+#define DEBUG_AVOID_HOISTING_EXISTING_BLOCKS 1
 
 //global which tracks which function most recently returned (used for tracking indirect call arcs)
 Name lastReturn;
@@ -32,6 +33,8 @@ std::vector<Name> functionImports;
 
 std::vector<Function *> functionsToAdd;
 
+//for each block, store list that needs to be added
+std::map<Block *, std::vector<Block *>> blkList;
 
 void ProfVisitor::instrument(Module* module)
 {
@@ -339,8 +342,10 @@ Function * ProfVisitor::addDecorator(Function *originalFunc, Name decoratorName,
     curBlock->list.push_back(createArcCounter(arc.globalCounter));
     
     //if the src was zero this was an entry, so print results and reset lastCaller
-    Call *result_call = createCall(getModule()->allocator, Name("_profPrintResultInternal"), 0);
-    curBlock->list.push_back(result_call);
+    if(forceDataExport){
+        Call *result_call = createCall(getModule()->allocator, Name("exportData"), 0);
+        curBlock->list.push_back(result_call);
+    }
     curBlock->list.push_back(createSetGlobal(lastCaller, createConst(Literal(0))));
     curBlock->list.push_back(ret);
 
@@ -493,12 +498,6 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
         parentBlk->list.push_back(call->expression); //add to hoist block
         callReplacement = new Nop();
     }
-    // else if((getParent() && getParent()->is<Drop>())){
-    //     Drop *drop = new Drop();
-    //     drop->value = call->expression;
-    //     parentBlk->list.push_back(drop);
-    //     callReplacement = createConst(Literal(0));
-    // }
     //else save the return value
     else{
         getFunction()->vars.push_back(call->returnType); 
@@ -512,7 +511,7 @@ Expression * ProfVisitor::saveReturn(Block *parentBlk, struct GenericCall *call)
 
 void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBlockPtr, int newBlockStackLevel)
 {
-    if(DEBUG_AVOID_HOISTING){
+    if(DEBUG_AVOID_HOISTING_NEW_BLOCKS){
         Block *insideBlk = new Block(getModule()->allocator);
         //everything that should go before the call
         for(Expression *exp : call->beforeCall){
@@ -543,6 +542,7 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
     }
 
     Block *newBlk = new Block(getModule()->allocator);
+    newBlk->type = (*newBlockPtr)->type;
 
     //everything that should go before the call
     for(Expression *exp : call->beforeCall){
@@ -597,72 +597,154 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
 void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call, 
     Block *blk, Expression *firstChild)
 {
-    //find where in the block the current execution is
-    Block *newBlk = new Block(getModule()->allocator);
+    //locate where the call is in the block
     int blkLoc;
     for(blkLoc = 0; blkLoc < blk->list.size(); blkLoc++){
         if(blk->list[blkLoc] == firstChild){
             break;
         }
-        newBlk->list.push_back(blk->list[blkLoc]);
     }
-    
-    //call is already in the block
+    if(blkLoc == blk->list.size()){
+        std::cerr << "Could not locate call in block" << std::endl;
+    }
+
+    //case where call is a direct child of block
     if(firstChild == call->expression){
+        //stuff that goes before call
+        Block *beforeBlk = new Block(getModule()->allocator);
+        for(Expression *exp : call->beforeCall){
+            beforeBlk->list.push_back(exp);
+        }
+        beforeBlk->list.push_back(firstChild);
+        blkList[blk].push_back(beforeBlk);
+
+        //stuff that goes after call
+        Block *afterBlk = new Block(getModule()->allocator);
+        for(Expression *exp : call->afterCall){
+            afterBlk->list.push_back(exp);
+        }
+        if(blkLoc + 1 >= blk->list.size()){
+            afterBlk->list.push_back(NULL);
+        }
+        else{
+            afterBlk->list.push_back(blk->list[blkLoc+1]);
+        }
+        blkList[blk].push_back(afterBlk);
+    }
+    //debug case
+    else if(DEBUG_AVOID_HOISTING_EXISTING_BLOCKS){
+        Block *insideBlk = new Block(getModule()->allocator);
         //everything that should go before the call
         for(Expression *exp : call->beforeCall){
-            newBlk->list.push_back(exp);
+            insideBlk->list.push_back(exp);
         }
-
-        newBlk->list.push_back(call->expression);
-        blkLoc++;
+        getFunction()->vars.push_back(call->returnType); 
+        Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
+        insideBlk->list.push_back(createSetLocal(ind, call->expression)); //add to hoist block
 
         //everything that should go after the call
         for(Expression *exp : call->afterCall){
-           newBlk->list.push_back(exp);
+            insideBlk->list.push_back(exp);
         }
+        insideBlk->list.push_back(createGetLocal(ind));
+        insideBlk->type = call->returnType;
+        replaceCurrent(insideBlk);
     }
-    else{
-        if(DEBUG_AVOID_HOISTING){
-            newBlk->list.push_back(blk->list[blkLoc]);//DEBUG
-            blkLoc++;
-            Block *insideBlk = new Block(getModule()->allocator);
-            //everything that should go before the call
-            for(Expression *exp : call->beforeCall){
-                insideBlk->list.push_back(exp);
-            }
-            getFunction()->vars.push_back(call->returnType); 
-            Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
-            insideBlk->list.push_back(createSetLocal(ind, call->expression)); //add to hoist block
+    //case where call is nested in another expression
+    else{        
+        //stuff that goes before call
+        const char *nam = getFunction()->name.c_str();
+        Block *beforeBlk = new Block(getModule()->allocator);
+        for(Expression *exp : call->beforeCall){
+            beforeBlk->list.push_back(exp);
+        }
 
-            //everything that should go after the call
-            for(Expression *exp : call->afterCall){
-                insideBlk->list.push_back(exp);
-            }
-            insideBlk->list.push_back(createGetLocal(ind));
-            insideBlk->type = call->returnType;
-            replaceCurrent(insideBlk);
+        //call itself (with optional save of result)
+        Expression *callReplacement = saveReturn(beforeBlk, call);
+
+        //stuff that goes after call
+        for(Expression *exp : call->afterCall){
+            beforeBlk->list.push_back(exp);
         }
-        else{
-            //everything that should go before the call
-            for(Expression *exp : call->beforeCall){
-                newBlk->list.push_back(exp);
-            }
-            Expression *callReplacement = saveReturn(newBlk, call);
-            replaceCurrent(callReplacement);
-            //everything that should go after the call
-            for(Expression *exp : call->afterCall){
-                newBlk->list.push_back(exp);
-            }
-        }
+
+        //expression that contains call
+        beforeBlk->list.push_back(firstChild);
+
+        blkList[blk].push_back(beforeBlk);
+    
+        replaceCurrent(callReplacement);
     }
 
-    //fill in rest of the block
-    for(; blkLoc < blk->list.size(); blkLoc++){
-        newBlk->list.push_back(blk->list[blkLoc]);
-    }
+    // //find where in the block the current execution is
+    // Block *newBlk = new Block(getModule()->allocator);
+    // int blkLoc;
+    // for(blkLoc = 0; blkLoc < blk->list.size(); blkLoc++){
+    //     if(blk->list[blkLoc] == firstChild){
+    //         break;
+    //     }
+    //     newBlk->list.push_back(blk->list[blkLoc]);
+    // }
+    
+    // //call is already in the block
+    // if(firstChild == call->expression){
+    //     //everything that should go before the call
+    //     for(Expression *exp : call->beforeCall){
+    //         newBlk->list.push_back(exp);
+    //     }
 
-    blk->list.swap(newBlk->list);
+    //     newBlk->list.push_back(call->expression);
+    //     blkLoc++;
+
+    //     //everything that should go after the call
+    //     for(Expression *exp : call->afterCall){
+    //        newBlk->list.push_back(exp);
+    //     }
+    // }
+    // else{
+    //     if(0){
+    //         newBlk->list.push_back(blk->list[blkLoc]);//DEBUG
+    //         blkLoc++;
+    //         Block *insideBlk = new Block(getModule()->allocator);
+    //         //everything that should go before the call
+    //         for(Expression *exp : call->beforeCall){
+    //             insideBlk->list.push_back(exp);
+    //         }
+    //         getFunction()->vars.push_back(call->returnType); 
+    //         Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
+    //         insideBlk->list.push_back(createSetLocal(ind, call->expression)); //add to hoist block
+
+    //         //everything that should go after the call
+    //         for(Expression *exp : call->afterCall){
+    //             insideBlk->list.push_back(exp);
+    //         }
+    //         insideBlk->list.push_back(createGetLocal(ind));
+    //         insideBlk->type = call->returnType;
+    //         replaceCurrent(insideBlk);
+    //     }
+    //     else{
+    //         //everything that should go before the call
+    //         for(Expression *exp : call->beforeCall){
+    //             newBlk->list.push_back(exp);
+    //         }
+    //         Expression *callReplacement = saveReturn(newBlk, call);
+    //         replaceCurrent(callReplacement);
+    //         //everything that should go after the call
+    //         for(Expression *exp : call->afterCall){
+    //             newBlk->list.push_back(exp);
+    //         }
+                    
+    //         WasmPrinter::printExpression(newBlk, std::cout);
+    //         std::cout << std::endl;
+    //         WasmPrinter::printExpression(blk, std::cout);
+    //     }
+    // }
+
+    // //fill in rest of the block
+    // for(; blkLoc < blk->list.size(); blkLoc++){
+    //     newBlk->list.push_back(blk->list[blkLoc]);
+    // }
+
+    // blk->list.swap(newBlk->list);
 }
 
 //this handles instrumenting both Call and CallIndirect instructions once the target is determined
@@ -694,6 +776,28 @@ void ProfVisitor::handleCall(struct GenericCall *genericCall)
             }
             else{
                 std::cerr << "Error matching expression in If" << std::endl;
+                WasmPrinter::printExpression(expressionStack[expStackLevel], std::cout);
+                exit(1);
+            }
+        }
+        else if(expressionStack[expStackLevel]->is<Select>()){
+            Select *selExp = expressionStack[expStackLevel]->dynCast<Select>();
+            //check where in the if
+            if(expressionStack[expStackLevel + 1] == selExp->ifTrue){
+                if(DEBUG_SKIP_NEW_BLOCKS) return;
+                hoistCallNewBlock(genericCall, &selExp->ifTrue, expStackLevel + 1);
+                return;
+            }
+            else if(expressionStack[expStackLevel + 1] == selExp->ifFalse){
+                if(DEBUG_SKIP_NEW_BLOCKS) return;
+                hoistCallNewBlock(genericCall, &selExp->ifFalse, expStackLevel + 1);
+                return;
+            }
+            else if(expressionStack[expStackLevel + 1] == selExp->condition){
+                continue;
+            }
+            else{
+                std::cerr << "Error matching expression in Select" << std::endl;
                 WasmPrinter::printExpression(expressionStack[expStackLevel], std::cout);
                 exit(1);
             }
@@ -763,6 +867,39 @@ void ProfVisitor::visitCallIndirect(CallIndirect *curr)
 
     //keep track of all call indirects
     indirectSrcIDs[curr->fullType].push_back(thisFunctionID);
+}
+
+void ProfVisitor::visitBlock(Block *curr)
+{
+    std::map<Block *, std::vector<Block *>>::iterator it;
+    it = blkList.find(curr);
+    if(it == blkList.end()){
+        return;
+    }
+
+    Block *newBlock = new Block(getModule()->allocator);
+    unsigned curPos = 0;
+    for(Block *addBlk : blkList[curr]){
+        while(curPos < curr->list.size() && addBlk->list.back() != curr->list[curPos]){
+            newBlock->list.push_back(curr->list[curPos]);
+            curPos++;
+        }
+        for(unsigned i = 0; i < addBlk->list.size()-1; i++){
+            newBlock->list.push_back(addBlk->list[i]);
+        }
+    }
+
+    while(curPos < curr->list.size()){
+        newBlock->list.push_back(curr->list[curPos]);
+        curPos ++;
+    }
+
+    //replaceCurrent(newBlock);
+    //swap instead of replace to maintain other properties of original block
+    curr->list.swap(newBlock->list);
+
+    //clear block list
+    blkList.erase(curr);
 }
 
 bool typesEqual(FunctionType *type1, FunctionType *type2)

@@ -45,6 +45,7 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
     bool dynamicIndirectUpdate = false; //calls to js instead of using LUT for resolving indirect call arcs
     bool dynamicExportUpdate = false; // calls to js instead of using LUT for resolving (js->exported func) arcs
     bool accumulateResults = false; //accumulate results through multiple top level calls into wasm (ie more than one main)
+    bool forceDataExport = false;
 
     //keeps track of the local index used for startTime (there only needs to be one per function)
     //-1 means it has not been set yet
@@ -90,10 +91,9 @@ struct ProfVisitor : public wasm::ExpressionStackWalker<ProfVisitor>
 
     //this handles instrumenting both Call and CallIndirect instructions
     void handleCall(struct GenericCall *genericCall);
-
     void visitCall(wasm::Call *curr);
-
     void visitCallIndirect(wasm::CallIndirect *curr);
+    void visitBlock(wasm::Block *curr);
 
 
     //want map: type -> list of functions

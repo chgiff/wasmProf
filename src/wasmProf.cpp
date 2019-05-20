@@ -65,8 +65,8 @@ void addProfFunctions(Module *mod, bool forcePrint)
     mod->addFunction(printResults);
 
     //print result function
-    Function *printRes = new Function();
-    printRes->name = Name("_profPrintResultInternal");
+    Function *exportData = new Function();
+    exportData->name = Name("exportData");
     Block *body = new Block(mod->allocator);
 
     //update tracking info for each arc by calling out to host
@@ -97,8 +97,16 @@ void addProfFunctions(Module *mod, bool forcePrint)
         c->target = printResults->name;
         body->list.push_back(c);
     }
-    printRes->body = body;
-    mod->addFunction(printRes);
+    exportData->body = body;
+
+    mod->addFunction(exportData);
+
+    //make it exported
+    Export *expor = new Export();
+    expor->name = "exportData";
+    expor->value = "exportData";
+    expor->kind = ExternalKind::Function;
+    mod->addExport(expor);
 }
 
 void addWasiFunctionExperimental(Module *mod)
@@ -173,20 +181,37 @@ void writeFuncNameMap(std::ofstream& jsFile)
     jsFile << JS_SRC(jsFuncMapName, jsFuncMap);
 }
 
-int main(int argc, const char* argv[]) 
+int main(int argc, char* argv[]) 
 {
     bool forcePrint = false;
-    int fileIndex = 1;
+    char empty = 0;
+    char *sourceMapFile = &empty;
     if(argc < 2){
         std::cout << "Usage: "<< argv[0] << "[-p] <wasm file>" << std::endl;
         std::cout << "[-p] force print, cause results to be printed main function exits" << std::endl;
+        std::cout << "[-s] <source> set sourcemap file" << std::endl;
         exit(0);
     }
 
-    //TODO better argparse
-    if(!strcmp(argv[1], "-p")){
-        forcePrint = true;
-        fileIndex = 2;
+    int curArg = 0;
+    while(curArg < argc){
+        if(!strcmp(argv[curArg], "-p")){
+            forcePrint = true;
+            for(int i = curArg +1; i < argc; i++){
+                argv[i-1] = argv[i];
+            }
+            argc--;
+        }
+        else if(!strcmp(argv[curArg], "-s")){
+            sourceMapFile = argv[curArg + 1];
+            for(int i = curArg+2; i < argc; i++){
+                argv[i-2] = argv[i];
+            }
+            argc--;
+        }
+        else{
+            curArg++;
+        }
     }
 
     Module mod;
@@ -196,7 +221,7 @@ int main(int argc, const char* argv[])
     WasmValidator wasmValid;
 
     try {
-        reader.read(argv[fileIndex], mod);
+        reader.read(argv[1], mod, sourceMapFile);
     } catch (ParseException& p) {
         p.dump(std::cerr);
         std::cerr << "Error in parsing input, Exiting" << std::endl;
@@ -217,7 +242,7 @@ int main(int argc, const char* argv[])
     }
     //WasmPrinter::printModule(&mod);
 
-    std::string path = std::string(argv[fileIndex]);
+    std::string path = std::string(argv[1]);
     size_t pathBasePos = path.rfind('/');
     std::string profPath;
     if(pathBasePos == std::string::npos) profPath = "prof_" + path;
