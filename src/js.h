@@ -154,13 +154,14 @@ let WasmProf = {\n\
         return new WasmProf.Results(functions);\n\
     }\n\
 };\n\
+window.WasmProf = WasmProf;\n\
 " + FUNCMAP + "\n\
 const oldInstantiate = WebAssembly.instantiate;\n\
 WebAssembly.instantiate = (sourceBuffer, importObject) => {\n\
     let importObjectWithProfiler = importObject || {};\n\
     importObjectWithProfiler.prof = {\n\
         printInt: arg => console.log('Debug int:' + arg),\n\
-        getTime: () => performance.now(),\n\
+        getTime: () => Date.now(),\n\
         clearResults: function() {\n\
             WasmProf.arcs = {};\n\
         },\n\
@@ -182,6 +183,21 @@ WebAssembly.instantiate = (sourceBuffer, importObject) => {\n\
         printResults: WasmProf.printResults\n\
     };\n\
     const result = oldInstantiate(sourceBuffer, importObjectWithProfiler);\n\
+    result.then(function(obj){\n\
+        if(obj.exports != undefined){\n\
+            var exp = obj.exports;\n\
+        }\n\
+        else{\n\
+            var exp = obj.instance.exports;\n\
+        }\n\
+        if(exp.exportData != undefined){\n\
+            WasmProf.exportData = exp.exportData;\n\
+        }\n\
+        else{\n\
+            console.log('Error WebAssembly file is missing exported function \"exportData\"');\n\
+            WasmProf.exportData = function(){};\n\
+        }\n\
+    });\n\
     return result;\n\
 };\n\
 const oldInstantiateStreaming = WebAssembly.instantiateStreaming;\n\

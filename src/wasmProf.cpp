@@ -6,6 +6,7 @@
 #include "ast_gen.h"
 
 #define WASI_EXPERIMENTAL 0
+#define DEBUG_ALWAYS_EXPORT_DATA 0
 
 using namespace wasm;
 
@@ -69,6 +70,16 @@ void addProfFunctions(Module *mod, bool forcePrint)
     exportData->name = Name("exportData");
     Block *body = new Block(mod->allocator);
 
+    //DEBUG
+    //body->list.push_back(createCall(mod->allocator, Name("printInt"), 1, createConst(Literal(74))));
+
+    Index countLocalInd = 0;
+    if(!DEBUG_ALWAYS_EXPORT_DATA){
+        //add local to store count of each arc for checking
+        exportData->vars.push_back(Type::i32);
+        countLocalInd = exportData->params.size() + exportData->vars.size() - 1;
+    }
+
     //update tracking info for each arc by calling out to host
     // for(struct CallPath & arc : arcs){
     for(auto & pair : arcs){
@@ -89,7 +100,23 @@ void addProfFunctions(Module *mod, bool forcePrint)
         c->operands.push_back(target);
         c->operands.push_back(gCount);
         c->operands.push_back(gTime);
-        body->list.push_back(c);
+
+        if(DEBUG_ALWAYS_EXPORT_DATA){
+            body->list.push_back(c);
+        }
+        else{
+            SetLocal *teeCount = createSetLocal(countLocalInd, c->operands[2]);
+            teeCount->setTee(true);
+            teeCount->type = Type::i32;
+
+            //set call to use local instead of getting global twice
+            c->operands[2] = createGetLocal(countLocalInd);
+
+            If *countCheck = new If();
+            countCheck->condition = teeCount;
+            countCheck->ifTrue = c;
+            body->list.push_back(countCheck);
+        }
     }
     if(forcePrint){
         //call imported print results function
@@ -231,7 +258,9 @@ int main(int argc, char* argv[])
     wasmValid.validate(mod, FeatureSet::MVP, WasmValidator::FlagValues::Minimal);
 
     v.setDynamicIndirectUpdate(true);
-    // v.setDynamicExportUpdate(true);
+    //v.forceDataExport = forcePrint;
+    v.forceDataExport = true;
+    //forcePrint = true;
     v.instrument(&mod);
     v.report();
     if(WASI_EXPERIMENTAL){

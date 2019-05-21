@@ -183,10 +183,6 @@ struct CallPath & ProfVisitor::getOrAddArc(unsigned int srcID, unsigned int dest
         arcs[hash] = arc;
     }
     return arcs[hash];
-
-
-    // arcs.push_back(arc);
-    // return arcs.back();
 }
 
 void ProfVisitor::addExportDecorator(Function *originalFunc)
@@ -477,6 +473,14 @@ void ProfVisitor::visitFunction(Function *curr)
     }
     curr->body = funcBlock;
 
+    //DEBUG shift to make room for debug
+    funcBlock->list.push_back(NULL);
+    for(unsigned i = funcBlock->list.size()-1; i > 0; i--){
+        funcBlock->list[i] = funcBlock->list[i-1];
+    }
+    funcBlock->list[0] = createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(curr->name))));
+    //END DEBUG
+
     //reset the start time index since this is the end of this function
     currFuncStartTimeIndex = -1;
 
@@ -634,6 +638,10 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
     //debug case
     else if(DEBUG_AVOID_HOISTING_EXISTING_BLOCKS){
         Block *insideBlk = new Block(getModule()->allocator);
+
+        //DEBUG
+        // insideBlk->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(getFunction()->name)))));
+
         //everything that should go before the call
         for(Expression *exp : call->beforeCall){
             insideBlk->list.push_back(exp);
@@ -651,10 +659,13 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
         replaceCurrent(insideBlk);
     }
     //case where call is nested in another expression
-    else{        
-        //stuff that goes before call
-        const char *nam = getFunction()->name.c_str();
+    else{
         Block *beforeBlk = new Block(getModule()->allocator);
+        
+        //DEBUG
+        // beforeBlk->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(getFunction()->name)))));
+
+        //stuff that goes before call
         for(Expression *exp : call->beforeCall){
             beforeBlk->list.push_back(exp);
         }
@@ -674,77 +685,6 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
     
         replaceCurrent(callReplacement);
     }
-
-    // //find where in the block the current execution is
-    // Block *newBlk = new Block(getModule()->allocator);
-    // int blkLoc;
-    // for(blkLoc = 0; blkLoc < blk->list.size(); blkLoc++){
-    //     if(blk->list[blkLoc] == firstChild){
-    //         break;
-    //     }
-    //     newBlk->list.push_back(blk->list[blkLoc]);
-    // }
-    
-    // //call is already in the block
-    // if(firstChild == call->expression){
-    //     //everything that should go before the call
-    //     for(Expression *exp : call->beforeCall){
-    //         newBlk->list.push_back(exp);
-    //     }
-
-    //     newBlk->list.push_back(call->expression);
-    //     blkLoc++;
-
-    //     //everything that should go after the call
-    //     for(Expression *exp : call->afterCall){
-    //        newBlk->list.push_back(exp);
-    //     }
-    // }
-    // else{
-    //     if(0){
-    //         newBlk->list.push_back(blk->list[blkLoc]);//DEBUG
-    //         blkLoc++;
-    //         Block *insideBlk = new Block(getModule()->allocator);
-    //         //everything that should go before the call
-    //         for(Expression *exp : call->beforeCall){
-    //             insideBlk->list.push_back(exp);
-    //         }
-    //         getFunction()->vars.push_back(call->returnType); 
-    //         Index ind = getFunction()->params.size() + getFunction()->vars.size() - 1; //locals are both params and vars
-    //         insideBlk->list.push_back(createSetLocal(ind, call->expression)); //add to hoist block
-
-    //         //everything that should go after the call
-    //         for(Expression *exp : call->afterCall){
-    //             insideBlk->list.push_back(exp);
-    //         }
-    //         insideBlk->list.push_back(createGetLocal(ind));
-    //         insideBlk->type = call->returnType;
-    //         replaceCurrent(insideBlk);
-    //     }
-    //     else{
-    //         //everything that should go before the call
-    //         for(Expression *exp : call->beforeCall){
-    //             newBlk->list.push_back(exp);
-    //         }
-    //         Expression *callReplacement = saveReturn(newBlk, call);
-    //         replaceCurrent(callReplacement);
-    //         //everything that should go after the call
-    //         for(Expression *exp : call->afterCall){
-    //             newBlk->list.push_back(exp);
-    //         }
-                    
-    //         WasmPrinter::printExpression(newBlk, std::cout);
-    //         std::cout << std::endl;
-    //         WasmPrinter::printExpression(blk, std::cout);
-    //     }
-    // }
-
-    // //fill in rest of the block
-    // for(; blkLoc < blk->list.size(); blkLoc++){
-    //     newBlk->list.push_back(blk->list[blkLoc]);
-    // }
-
-    // blk->list.swap(newBlk->list);
 }
 
 //this handles instrumenting both Call and CallIndirect instructions once the target is determined
@@ -832,18 +772,18 @@ void ProfVisitor::visitCall(Call *curr)
     if(getModule()->getFunction(curr->target)->imported()){
         genericCall.beforeCall.push_back(createSetGlobal(lastCaller, createConst(Literal(getOrAddFuncID(curr->target)))));
     }
-    getFunction()->vars.push_back(Type::f64);
-    Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    genericCall.beforeCall.push_back(createStartTime(startTimeLocalIndex));
-    // if(currFuncStartTimeIndex == -1){
-    //     getFunction()->vars.push_back(Type::f64);
-    //     currFuncStartTimeIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
-    // }
-    // genericCall.beforeCall.push_back(createStartTime(currFuncStartTimeIndex));
+    // getFunction()->vars.push_back(Type::f64);
+    // Index startTimeLocalIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
+    // genericCall.beforeCall.push_back(createStartTime(startTimeLocalIndex));
+    if(currFuncStartTimeIndex == -1){
+        getFunction()->vars.push_back(Type::f64);
+        currFuncStartTimeIndex = getFunction()->params.size() + getFunction()->vars.size() - 1;
+    }
+    genericCall.beforeCall.push_back(createStartTime(currFuncStartTimeIndex));
 
     //setup the timing needed after the call
-    genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
-    // genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, currFuncStartTimeIndex)); //DEBUG
+    // genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, startTimeLocalIndex));
+    genericCall.afterCall.push_back(createArcTimeAccum(arc.globalTimeInTarget, currFuncStartTimeIndex)); //DEBUG
     genericCall.afterCall.push_back(createArcCounter(arc.globalCounter));
 
     handleCall(&genericCall);
@@ -884,9 +824,11 @@ void ProfVisitor::visitBlock(Block *curr)
             newBlock->list.push_back(curr->list[curPos]);
             curPos++;
         }
-        for(unsigned i = 0; i < addBlk->list.size()-1; i++){
-            newBlock->list.push_back(addBlk->list[i]);
-        }
+        // for(unsigned i = 0; i < addBlk->list.size()-1; i++){
+        //     newBlock->list.push_back(addBlk->list[i]);
+        // }
+        addBlk->list.pop_back();
+        newBlock->list.push_back(addBlk);
     }
 
     while(curPos < curr->list.size()){
@@ -894,9 +836,11 @@ void ProfVisitor::visitBlock(Block *curr)
         curPos ++;
     }
 
-    //replaceCurrent(newBlock);
+    newBlock->name = curr->name;
+    newBlock->type = curr->type;
+    replaceCurrent(newBlock);
     //swap instead of replace to maintain other properties of original block
-    curr->list.swap(newBlock->list);
+    // curr->list.swap(newBlock->list);
 
     //clear block list
     blkList.erase(curr);

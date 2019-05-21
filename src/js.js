@@ -125,6 +125,7 @@ let WasmProf = {
 
     //saves the current state of the results and return a Results object
     saveResults: function() {
+        WasmProf.exportData();
         var functions = [];
         for (var s in WasmProf.arcs) {
             if (functions[s] == undefined) {
@@ -152,6 +153,7 @@ let WasmProf = {
     }
 };
 WasmProf.fMap = [];
+window.WasmProf = WasmProf;
 const oldInstantiate = WebAssembly.instantiate;
 WebAssembly.instantiate = (sourceBuffer, importObject) => {
     let importObjectWithProfiler = importObject || {};
@@ -179,6 +181,21 @@ WebAssembly.instantiate = (sourceBuffer, importObject) => {
         printResults: WasmProf.printResults
     };
     const result = oldInstantiate(sourceBuffer, importObjectWithProfiler);
+    result.then(function(obj){
+        if(obj.exports != undefined){
+            var exp = obj.exports;
+        }
+        else{
+            var exp = obj.instance.exports;
+        }
+        if(exp.exportData != undefined){
+            WasmProf.exportData = exp.exportData;
+        }
+        else{
+            console.log('Error WebAssembly file is missing exported function \"exportData\"');
+            WasmProf.exportData = function(){};
+        }
+    });
     return result;
 };
 const oldInstantiateStreaming = WebAssembly.instantiateStreaming;
