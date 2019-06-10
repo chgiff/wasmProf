@@ -23,7 +23,9 @@ let WasmProf = {
 
     //print function called by user or from wasm code on return if force print was enabled
     printResults: function() {
-        WasmProf.saveResults().flatProfile(-1);
+        var r = WasmProf.saveResults();
+        r.callGraph();
+        r.flatProfile();
     },
 
     //result info about a single function
@@ -74,10 +76,13 @@ let WasmProf = {
         flatProfile(count) {
             var totTime = (-1 * this.external.selfTime);
             console.log('Total time: ' + totTime);
-            console.log(' % \tcumulative\tself\tcalled\tname');
+            console.log(' % \tcumulative\tself\tcalled\tself ms/call\t total ms/call\tname');
             for (var i = 0; i < this.selfTimeSort.length && count != 0; i++) {
                 if (this.selfTimeSort[i] != undefined && this.selfTimeSort[i].called > 0) {
-                    console.log((100*this.selfTimeSort[i].selfTime/totTime).toFixed(2) + '\t' + this.selfTimeSort[i].cumulativeTime.toFixed(3) + '\t\t' + this.selfTimeSort[i].selfTime.toFixed(3) + '\t' + this.selfTimeSort[i].called + '\t' + this.selfTimeSort[i].name);
+                    console.log((100*this.selfTimeSort[i].selfTime/totTime).toFixed(2) + '\t' + this.selfTimeSort[i].cumulativeTime.toFixed(3) + '\t\t' + 
+                            this.selfTimeSort[i].selfTime.toFixed(3) + '\t' + this.selfTimeSort[i].called + '\t' + 
+                            (this.selfTimeSort[i].selfTime/this.selfTimeSort[i].called ).toFixed(3) + '\t' + 
+                            (this.selfTimeSort[i].cumulativeTime/this.selfTimeSort[i].called).toFixed(3) + '\t' + this.selfTimeSort[i].name);
                     count--;
                 }
             }
@@ -88,16 +93,22 @@ let WasmProf = {
                 if(parent.function.index == undefined) console.log('\t\t\t\t\t\t  <spontaneous>');
                 else {
                     var parentCount = (parent.arc.count + parent.arc.dynamicCount);
-                    var parentSelf = curFunc.selfTime * parentCount / curFunc.called;
-                    var parentChildren = (curFunc.cumulativeTime - curFunc.selfTime) * parentCount / curFunc.called;
+                    var parentTotalTime = (parent.arc.time + parent.arc.dynamicTime);
+                    var parentSelf = parentTotalTime * (curFunc.selfTime/curFunc.cumulativeTime);
+                    //var parentSelf = curFunc.selfTime * parentCount / curFunc.called;
+                    //var parentChildren = (curFunc.cumulativeTime - curFunc.selfTime) * parentCount / curFunc.called;
+                    var parentChildren = parentTotalTime - parentSelf;
                     console.log('\t\t' + parentSelf.toFixed(3) + '\t' + parentChildren.toFixed(3) + '\t\t' + parentCount + '/' + curFunc.called + '\t' + 
                         parent.function.name + ' ['+parent.function.index+']');
                 }
             }
             function printChild(child){
                 var childCount = (child.arc.count + child.arc.dynamicCount);
-                var childSelf = child.function.selfTime * childCount / curFunc.called;
-                var childChildren = (child.function.cumulativeTime - child.function.selfTime) * childCount / curFunc.called;
+                var childTotalTime = (child.arc.time + child.arc.dynamicTime);
+                // var childSelf = child.function.selfTime * childCount / curFunc.called;
+                // var childChildren = (child.function.cumulativeTime - child.function.selfTime) * childCount / curFunc.called;
+                var childSelf = childTotalTime * (curFunc.selfTime/curFunc.cumulativeTime);
+                var childChildren = childTotalTime - childSelf;
                 console.log('\t\t' + childSelf.toFixed(3) + '\t' + childChildren.toFixed(3) + '\t\t' + childCount + '/' + child.function.called + '\t' + 
                         child.function.name + ' ['+child.function.index+']');
             }
@@ -153,7 +164,8 @@ let WasmProf = {
     }
 };
 WasmProf.fMap = [];
-window.WasmProf = WasmProf;
+if(typeof window != 'undefined') window.WasmProf = WasmProf;
+
 const oldInstantiate = WebAssembly.instantiate;
 WebAssembly.instantiate = (sourceBuffer, importObject) => {
     let importObjectWithProfiler = importObject || {};

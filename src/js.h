@@ -77,10 +77,13 @@ let WasmProf = {\n\
         flatProfile(count) {\n\
             var totTime = (-1 * this.external.selfTime);\n\
             console.log('Total time: ' + totTime);\n\
-            console.log(' % \tcumulative\tself\tcalled\tname');\n\
+            console.log(' % \tcumulative\tself\tcalled\tself ms/call\t total ms/call\tname');\n\
             for (var i = 0; i < this.selfTimeSort.length && count != 0; i++) {\n\
                 if (this.selfTimeSort[i] != undefined && this.selfTimeSort[i].called > 0) {\n\
-                    console.log((100*this.selfTimeSort[i].selfTime/totTime).toFixed(2) + '\t' + this.selfTimeSort[i].cumulativeTime.toFixed(3) + '\t\t' + this.selfTimeSort[i].selfTime.toFixed(3) + '\t' + this.selfTimeSort[i].called + '\t' + this.selfTimeSort[i].name);\n\
+                    console.log((100*this.selfTimeSort[i].selfTime/totTime).toFixed(2) + '\t' + this.selfTimeSort[i].cumulativeTime.toFixed(3) + '\t\t' + \n\
+                            this.selfTimeSort[i].selfTime.toFixed(3) + '\t' + this.selfTimeSort[i].called + '\t' + \n\
+                            (this.selfTimeSort[i].selfTime/this.selfTimeSort[i].called ).toFixed(3) + '\t' + \n\
+                            (this.selfTimeSort[i].cumulativeTime/this.selfTimeSort[i].called).toFixed(3) + '\t' + this.selfTimeSort[i].name);\n\
                     count--;\n\
                 }\n\
             }\n\
@@ -91,16 +94,18 @@ let WasmProf = {\n\
                 if(parent.function.index == undefined) console.log('\t\t\t\t\t\t  <spontaneous>');\n\
                 else {\n\
                     var parentCount = (parent.arc.count + parent.arc.dynamicCount);\n\
-                    var parentSelf = curFunc.selfTime * parentCount / curFunc.called;\n\
-                    var parentChildren = (curFunc.cumulativeTime - curFunc.selfTime) * parentCount / curFunc.called;\n\
+                    var parentTotalTime = (parent.arc.time + parent.arc.dynamicTime);\n\
+                    var parentSelf = parentTotalTime * (curFunc.selfTime/curFunc.cumulativeTime);\n\
+                    var parentChildren = parentTotalTime - parentSelf;\n\
                     console.log('\t\t' + parentSelf.toFixed(3) + '\t' + parentChildren.toFixed(3) + '\t\t' + parentCount + '/' + curFunc.called + '\t' + \n\
                         parent.function.name + ' ['+parent.function.index+']');\n\
                 }\n\
             }\n\
             function printChild(child){\n\
                 var childCount = (child.arc.count + child.arc.dynamicCount);\n\
-                var childSelf = child.function.selfTime * childCount / curFunc.called;\n\
-                var childChildren = (child.function.cumulativeTime - child.function.selfTime) * childCount / curFunc.called;\n\
+                var childTotalTime = (child.arc.time + child.arc.dynamicTime);\n\
+                var childSelf = childTotalTime * (curFunc.selfTime/curFunc.cumulativeTime);\n\
+                var childChildren = childTotalTime - childSelf;\n\
                 console.log('\t\t' + childSelf.toFixed(3) + '\t' + childChildren.toFixed(3) + '\t\t' + childCount + '/' + child.function.called + '\t' + \n\
                         child.function.name + ' ['+child.function.index+']');\n\
             }\n\
@@ -154,7 +159,7 @@ let WasmProf = {\n\
         return new WasmProf.Results(functions);\n\
     }\n\
 };\n\
-window.WasmProf = WasmProf;\n\
+if(typeof window != 'undefined') window.WasmProf = WasmProf;\n\
 " + FUNCMAP + "\n\
 const oldInstantiate = WebAssembly.instantiate;\n\
 WebAssembly.instantiate = (sourceBuffer, importObject) => {\n\

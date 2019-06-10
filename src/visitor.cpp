@@ -6,6 +6,7 @@
 
 using namespace wasm;
 
+//debug flags to control certain features
 #define DEBUG_SKIP_DECORATOR 0
 #define DEBUG_SKIP_CALL_TRACKING 0
 #define DEBUG_SKIP_INDIRECT_CALL_TRACKING 0
@@ -33,8 +34,8 @@ std::vector<Name> functionImports;
 
 std::vector<Function *> functionsToAdd;
 
-//for each block, store list that needs to be added
-std::map<Block *, std::vector<Block *>> blkList;
+//for each block, store it's replacement which will be swapped in
+std::map<Block *, Block*> newBlockMap;
 
 void ProfVisitor::instrument(Module* module)
 {
@@ -474,11 +475,11 @@ void ProfVisitor::visitFunction(Function *curr)
     curr->body = funcBlock;
 
     //DEBUG shift to make room for debug
-    funcBlock->list.push_back(NULL);
-    for(unsigned i = funcBlock->list.size()-1; i > 0; i--){
-        funcBlock->list[i] = funcBlock->list[i-1];
-    }
-    funcBlock->list[0] = createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(curr->name))));
+    // funcBlock->list.push_back(NULL);
+    // for(unsigned i = funcBlock->list.size()-1; i > 0; i--){
+    //     funcBlock->list[i] = funcBlock->list[i-1];
+    // }
+    // funcBlock->list[0] = createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(curr->name))));
     //END DEBUG
 
     //reset the start time index since this is the end of this function
@@ -596,51 +597,62 @@ void ProfVisitor::hoistCallNewBlock(struct GenericCall *call, Expression **newBl
     replaceCurrent(callReplacement);
 }
 
-//blk is the block to host the call into
+//origBlock is the block to hoist the call into
 //first child is the exprssion that contains the call but is a direct child of the block
 void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call, 
-    Block *blk, Expression *firstChild)
+    Block *origBlock, Expression *firstChild)
 {
-    //locate where the call is in the block
-    int blkLoc;
-    for(blkLoc = 0; blkLoc < blk->list.size(); blkLoc++){
-        if(blk->list[blkLoc] == firstChild){
-            break;
+    Block *curReplBlock;
+    //see if the block already has a potential replacement
+    std::map<Block *, Block *>::iterator it;
+    it = newBlockMap.find(origBlock);
+    if(it == newBlockMap.end()){
+        curReplBlock = new Block(getModule()->allocator);
+        curReplBlock->name = origBlock->name;
+        curReplBlock->type = origBlock->type;
+        for(Expression * exp : origBlock->list){
+            curReplBlock->list.push_back(exp);
         }
     }
-    if(blkLoc == blk->list.size()){
+    else{
+        curReplBlock = it->second;
+    }
+
+    Block *newReplBlock = new Block(getModule()->allocator);
+    //locate where the call is in the block
+    int blkLoc;
+    for(blkLoc = 0; blkLoc < curReplBlock->list.size(); blkLoc++){
+        if(curReplBlock->list[blkLoc] == firstChild){
+            break;
+        }
+        newReplBlock->list.push_back(curReplBlock->list[blkLoc]);
+    }
+    if(blkLoc == curReplBlock->list.size()){
         std::cerr << "Could not locate call in block" << std::endl;
     }
 
     //case where call is a direct child of block
     if(firstChild == call->expression){
         //stuff that goes before call
-        Block *beforeBlk = new Block(getModule()->allocator);
         for(Expression *exp : call->beforeCall){
-            beforeBlk->list.push_back(exp);
+            newReplBlock->list.push_back(exp);
         }
-        beforeBlk->list.push_back(firstChild);
-        blkList[blk].push_back(beforeBlk);
+
+        //call itself
+        newReplBlock->list.push_back(firstChild);
 
         //stuff that goes after call
-        Block *afterBlk = new Block(getModule()->allocator);
         for(Expression *exp : call->afterCall){
-            afterBlk->list.push_back(exp);
+            newReplBlock->list.push_back(exp);
         }
-        if(blkLoc + 1 >= blk->list.size()){
-            afterBlk->list.push_back(NULL);
-        }
-        else{
-            afterBlk->list.push_back(blk->list[blkLoc+1]);
-        }
-        blkList[blk].push_back(afterBlk);
+        blkLoc++; //so call doesn't get added twice
     }
     //debug case
     else if(DEBUG_AVOID_HOISTING_EXISTING_BLOCKS){
         Block *insideBlk = new Block(getModule()->allocator);
 
         //DEBUG
-        // insideBlk->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(getFunction()->name)))));
+        // insideBlk->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(10000 + getOrAddFuncID(getFunction()->name)))));
 
         //everything that should go before the call
         for(Expression *exp : call->beforeCall){
@@ -660,31 +672,34 @@ void ProfVisitor::hoistCallExistingBlock(struct GenericCall *call,
     }
     //case where call is nested in another expression
     else{
-        Block *beforeBlk = new Block(getModule()->allocator);
-        
         //DEBUG
-        // beforeBlk->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(getOrAddFuncID(getFunction()->name)))));
+        // newReplBlock->list.push_back(createCall(getModule()->allocator, Name("printInt"), 1, createConst(Literal(10000 + getOrAddFuncID(getFunction()->name)))));
 
         //stuff that goes before call
         for(Expression *exp : call->beforeCall){
-            beforeBlk->list.push_back(exp);
+            newReplBlock->list.push_back(exp);
         }
 
         //call itself (with optional save of result)
-        Expression *callReplacement = saveReturn(beforeBlk, call);
+        Expression *callReplacement = saveReturn(newReplBlock, call);
 
         //stuff that goes after call
         for(Expression *exp : call->afterCall){
-            beforeBlk->list.push_back(exp);
+            newReplBlock->list.push_back(exp);
         }
-
-        //expression that contains call
-        beforeBlk->list.push_back(firstChild);
-
-        blkList[blk].push_back(beforeBlk);
     
         replaceCurrent(callReplacement);
     }
+
+    //fill in the rest of the block
+    for(; blkLoc < curReplBlock->list.size(); blkLoc++){
+        newReplBlock->list.push_back(curReplBlock->list[blkLoc]);
+    }
+    newReplBlock->name = curReplBlock->name;
+    newReplBlock->type = curReplBlock->type;
+
+    newBlockMap[origBlock] = newReplBlock;
+    delete curReplBlock;
 }
 
 //this handles instrumenting both Call and CallIndirect instructions once the target is determined
@@ -811,39 +826,42 @@ void ProfVisitor::visitCallIndirect(CallIndirect *curr)
 
 void ProfVisitor::visitBlock(Block *curr)
 {
-    std::map<Block *, std::vector<Block *>>::iterator it;
-    it = blkList.find(curr);
-    if(it == blkList.end()){
+    std::map<Block *, Block *>::iterator it;
+    it = newBlockMap.find(curr);
+    if(it == newBlockMap.end()){
         return;
     }
 
-    Block *newBlock = new Block(getModule()->allocator);
-    unsigned curPos = 0;
-    for(Block *addBlk : blkList[curr]){
-        while(curPos < curr->list.size() && addBlk->list.back() != curr->list[curPos]){
-            newBlock->list.push_back(curr->list[curPos]);
-            curPos++;
-        }
-        // for(unsigned i = 0; i < addBlk->list.size()-1; i++){
-        //     newBlock->list.push_back(addBlk->list[i]);
-        // }
-        addBlk->list.pop_back();
-        newBlock->list.push_back(addBlk);
-    }
+    replaceCurrent(newBlockMap[curr]);
+    return;
 
-    while(curPos < curr->list.size()){
-        newBlock->list.push_back(curr->list[curPos]);
-        curPos ++;
-    }
+    // Block *newBlock = new Block(getModule()->allocator);
+    // unsigned curPos = 0;
+    // for(Block *addBlk : blkList[curr]){
+    //     while(curPos < curr->list.size() && addBlk->list.back() != curr->list[curPos]){
+    //         newBlock->list.push_back(curr->list[curPos]);
+    //         curPos++;
+    //     }
+    //     // for(unsigned i = 0; i < addBlk->list.size()-1; i++){
+    //     //     newBlock->list.push_back(addBlk->list[i]);
+    //     // }
+    //     addBlk->list.pop_back();
+    //     newBlock->list.push_back(addBlk);
+    // }
 
-    newBlock->name = curr->name;
-    newBlock->type = curr->type;
-    replaceCurrent(newBlock);
-    //swap instead of replace to maintain other properties of original block
-    // curr->list.swap(newBlock->list);
+    // while(curPos < curr->list.size()){
+    //     newBlock->list.push_back(curr->list[curPos]);
+    //     curPos ++;
+    // }
 
-    //clear block list
-    blkList.erase(curr);
+    // newBlock->name = curr->name;
+    // newBlock->type = curr->type;
+    // replaceCurrent(newBlock);
+    // //swap instead of replace to maintain other properties of original block
+    // // curr->list.swap(newBlock->list);
+
+    // //clear block list
+    // blkList.erase(curr);
 }
 
 bool typesEqual(FunctionType *type1, FunctionType *type2)
