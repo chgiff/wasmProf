@@ -1,6 +1,21 @@
 # WasmProf
 WebAssembly Instrumenting Profiler
 
+# Compiling
+First clone the repo and its submodules
+```bash
+git clone --recurse-submodules git@github.com:chgiff/wasmProf.git
+```
+
+Then cd into the cloned wasmProf director and run
+```bash
+make setup
+```
+
+Finally, build wasmProf using
+```bash
+make
+```
 
 # Usage
 
