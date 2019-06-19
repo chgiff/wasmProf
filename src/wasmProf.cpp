@@ -214,9 +214,9 @@ int main(int argc, char* argv[])
     char empty = 0;
     char *sourceMapFile = &empty;
     if(argc < 2){
-        std::cout << "Usage: "<< argv[0] << "[-p] <wasm file>" << std::endl;
+        std::cout << "Usage: "<< argv[0] << " [-p] <wasm file>" << std::endl;
         std::cout << "[-p] force print, cause results to be printed main function exits" << std::endl;
-        std::cout << "[-s] <source> set sourcemap file" << std::endl;
+        //std::cout << "[-s] <source> set sourcemap file" << std::endl;
         exit(0);
     }
 
